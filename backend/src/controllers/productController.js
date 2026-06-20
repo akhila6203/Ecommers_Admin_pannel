@@ -1,0 +1,1181 @@
+import { query, getConnection } from "../config/db.js";
+import { generateSlug, generateUniqueSlug } from "../helpers/slugHelper.js";
+import { generateSKU, calculateDiscount } from "../helpers/generateHelper.js";
+import { successResponse, errorResponse, paginatedResponse } from "../helpers/responseHelper.js";
+import logger from "../config/logger.js";
+
+const parseJsonField = (value) => {
+  if (value == null || value === "") return null;
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+const parseStockValue = (val) => {
+  const n = Number.parseInt(String(val ?? "0").trim(), 10);
+  return Number.isNaN(n) || n < 0 ? 0 : n;
+};
+
+const parsePriceValue = (val, fallback = 0) => {
+  const n = Number.parseFloat(String(val ?? fallback));
+  return Number.isNaN(n) || n < 0 ? fallback : n;
+};
+
+const extractFabricsFromOptionValues = (optionValues) => {
+  let options = optionValues;
+  if (typeof options === "string") {
+    try {
+      options = JSON.parse(options);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(options)) return null;
+  const fabric = options.find((o) => o.name?.toLowerCase() === "fabric");
+  return fabric?.value || null;
+};
+
+const collectProductFabrics = (variants) => {
+  const fabrics = new Set();
+  for (const v of variants || []) {
+    const fabric = extractFabricsFromOptionValues(v.option_values);
+    if (fabric) fabrics.add(fabric);
+  }
+  return [...fabrics].join(", ");
+};
+
+const deriveProductStockFromVariants = (variantRows) =>
+  (variantRows || []).reduce((sum, v) => sum + parseStockValue(v.stock), 0);
+
+const deriveProductPricesFromVariants = (variantRows, fallbackPrice, fallbackOffer) => {
+  if (!variantRows?.length) {
+    return {
+      price: parsePriceValue(fallbackPrice),
+      offer_price: parsePriceValue(fallbackOffer),
+    };
+  }
+  let selected = null;
+  for (const v of variantRows) {
+    const offer = parsePriceValue(v.offer_price ?? v.price, 0);
+    const compare = parsePriceValue(v.price ?? offer, offer);
+    if (!selected || offer < selected.offer_price) {
+      selected = { price: compare, offer_price: offer };
+    }
+  }
+  return (
+    selected || {
+      price: parsePriceValue(fallbackPrice),
+      offer_price: parsePriceValue(fallbackOffer),
+    }
+  );
+};
+
+const resolveStockStatus = (stockQty, threshold = 5) => {
+  if (stockQty <= 0) return "out_of_stock";
+  if (stockQty <= threshold) return "low_stock";
+  return "in_stock";
+};
+
+const syncProductInventory = async (conn, productId, stockQty, threshold = 5) => {
+  await conn.execute(
+    "UPDATE inventory SET quantity = ?, available_quantity = ? WHERE product_id = ?",
+    [stockQty, stockQty, productId]
+  );
+  await conn.execute("UPDATE products SET stock = ?, stock_status = ? WHERE id = ?", [
+    stockQty,
+    resolveStockStatus(stockQty, threshold),
+    productId,
+  ]);
+};
+
+const parseCollectionIds = (value) => {
+  if (value == null || value === "") return [];
+  const raw = typeof value === "string" ? parseJsonField(value) ?? value : value;
+  const arr = Array.isArray(raw) ? raw : [raw];
+  return arr.map((id) => parseInt(id, 10)).filter((id) => !Number.isNaN(id) && id > 0);
+};
+
+const variantOptionsFromRow = (opts) => {
+  if (!opts?.length) return [];
+  return opts.map((o) => ({ name: o.name, value: o.value }));
+};
+
+const resolveVariantDimensions = (opts) => {
+  const options = variantOptionsFromRow(opts);
+  const size = options.find((o) => o.name?.toLowerCase() === "size")?.value || options[0]?.value || null;
+  const color = options.find((o) => o.name?.toLowerCase() === "color")?.value || options[1]?.value || null;
+  const optionValues = options.length ? JSON.stringify(options) : null;
+  return { size, color, optionValues };
+};
+
+const toNullableId = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null || value === "" || value === "null" || value === "undefined") return null;
+  const n = parseInt(value, 10);
+  return Number.isNaN(n) || n <= 0 ? null : n;
+};
+
+const resolveCategoryIds = (existing, category_id, sub_category_id, child_category_id) => {
+  let catId = category_id !== undefined ? toNullableId(category_id) : existing.category_id;
+  let subId = sub_category_id !== undefined ? toNullableId(sub_category_id) : existing.sub_category_id;
+  let childId = child_category_id !== undefined ? toNullableId(child_category_id) : existing.child_category_id;
+  if (!catId) {
+    subId = null;
+    childId = null;
+  } else if (!subId) {
+    childId = null;
+  }
+  return { catId, subId, childId };
+};
+
+const cartesianCombinations = (options) => {
+  if (!options?.length) return [];
+  return options.reduce(
+    (acc, opt) => {
+      const values = Array.isArray(opt.option_values)
+        ? opt.option_values
+        : parseJsonField(opt.option_values) || [];
+      return acc.flatMap((combo) =>
+        values.map((v) => [...combo, { name: opt.option_name, value: v }])
+      );
+    },
+    [[]]
+  );
+};
+
+async function saveVariantOptionsAndVariants(conn, productId, variantOptions, variants, price, offerPrice, productStock = 0) {
+  const options = parseJsonField(variantOptions) || variantOptions;
+  if (!options?.length) return null;
+
+  await conn.execute("DELETE FROM product_variant_options WHERE product_id = ?", [productId]);
+  await conn.execute("DELETE FROM product_variants WHERE product_id = ?", [productId]);
+
+  for (let i = 0; i < options.length; i++) {
+    const opt = options[i];
+    const values = Array.isArray(opt.option_values)
+      ? opt.option_values
+      : parseJsonField(opt.option_values) || [];
+    await conn.execute(
+      "INSERT INTO product_variant_options (product_id, option_name, option_values, sort_order) VALUES (?, ?, ?, ?)",
+      [productId, opt.option_name, JSON.stringify(values), opt.sort_order ?? i]
+    );
+  }
+
+  let variantRows = parseJsonField(variants) || variants || [];
+  if (!variantRows.length) {
+    const combos = cartesianCombinations(options);
+    const defaultStock = parseStockValue(productStock);
+    variantRows = combos.map((combo, i) => ({
+      options: combo,
+      sku: `VAR-${productId}-${String(i).padStart(3, "0")}`,
+      price,
+      offer_price: offerPrice,
+      stock: defaultStock,
+    }));
+  }
+
+  const savedVariants = [];
+  for (let i = 0; i < variantRows.length; i++) {
+    const v = variantRows[i];
+    const opts = v.options || [];
+    const { size, color, optionValues } = resolveVariantDimensions(opts.length ? opts : [
+      v.size ? { name: "Size", value: v.size } : null,
+      v.color ? { name: "Color", value: v.color } : null,
+    ].filter(Boolean));
+    const variantSku = String(v.sku || "").trim() || `VAR-${productId}-${String(i).padStart(3, "0")}`;
+    const variantStock = parseStockValue(v.stock);
+    const variantPrice = parsePriceValue(v.price ?? price, parsePriceValue(price));
+    const variantOffer = parsePriceValue(v.offer_price ?? offerPrice, parsePriceValue(offerPrice));
+    await conn.execute(
+      "INSERT INTO product_variants (product_id, sku, size, color, option_values, price, offer_price, stock, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+      [
+        productId,
+        variantSku,
+        size,
+        color,
+        optionValues,
+        variantPrice,
+        variantOffer,
+        variantStock,
+      ]
+    );
+    savedVariants.push({
+      sku: variantSku,
+      price: variantPrice,
+      offer_price: variantOffer,
+      stock: variantStock,
+      option_values: optionValues,
+    });
+  }
+
+  return savedVariants;
+}
+
+async function applyVariantSyncToProduct(conn, productId, savedVariants, fallbackPrice, fallbackOffer, threshold = 5) {
+  if (!savedVariants?.length) return null;
+
+  const totalStock = deriveProductStockFromVariants(savedVariants);
+  const prices = deriveProductPricesFromVariants(savedVariants, fallbackPrice, fallbackOffer);
+  const discount = calculateDiscount(prices.price, prices.offer_price);
+
+  await conn.execute(
+    "UPDATE products SET stock = ?, stock_status = ?, price = ?, offer_price = ?, discount_percentage = ? WHERE id = ?",
+    [totalStock, resolveStockStatus(totalStock, threshold), prices.price, prices.offer_price, discount, productId]
+  );
+  await syncProductInventory(conn, productId, totalStock, threshold);
+
+  return { stock: totalStock, ...prices, discount_percentage: discount };
+}
+
+async function syncProductCollections(conn, productId, collectionIds) {
+  if (collectionIds === undefined) return;
+
+  const ids = parseCollectionIds(collectionIds);
+  await conn.execute("DELETE FROM collection_products WHERE product_id = ?", [productId]);
+
+  for (let i = 0; i < ids.length; i++) {
+    await conn.execute(
+      "INSERT INTO collection_products (collection_id, product_id, sort_order) VALUES (?, ?, ?)",
+      [ids[i], productId, i]
+    );
+  }
+}
+
+async function saveProductSeoData(conn, productId, seoData) {
+  const seo = parseJsonField(seoData) || seoData;
+  if (!seo) return;
+
+  const { seo_title, seo_description } = seo;
+  if (!seo_title && !seo_description) return;
+
+  const [existing] = await conn.execute("SELECT id FROM product_seo WHERE product_id = ?", [productId]);
+  if (existing.length) {
+    await conn.execute(
+      "UPDATE product_seo SET seo_title = ?, seo_description = ? WHERE product_id = ?",
+      [seo_title || null, seo_description || null, productId]
+    );
+  } else {
+    await conn.execute(
+      "INSERT INTO product_seo (product_id, seo_title, seo_description) VALUES (?, ?, ?)",
+      [productId, seo_title || null, seo_description || null]
+    );
+  }
+}
+
+const checkProductSlug = async (slug, excludeId = null) => {
+  let sql = "SELECT id FROM products WHERE slug = ?";
+  const params = [slug];
+  if (excludeId) {
+    sql += " AND id != ?";
+    params.push(excludeId);
+  }
+  const result = await query(sql, params);
+  return result.length > 0 ? result[0] : null;
+};
+
+// @desc    Get all products with filters, pagination, sorting
+// @route   GET /api/products
+export const getProducts = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+    const search = req.query.search || "";
+    const status = req.query.status || "";
+    const category_id = req.query.category_id || "";
+    const sub_category_id = req.query.sub_category_id || "";
+    const child_category_id = req.query.child_category_id || "";
+    const featured = req.query.featured || "";
+    const trending = req.query.trending || "";
+    const best_seller = req.query.best_seller || "";
+    const stock_status = req.query.stock_status || "";
+    const min_price = req.query.min_price || "";
+    const max_price = req.query.max_price || "";
+    const sort = req.query.sort || "created_at";
+    const order = req.query.order || "DESC";
+
+    let whereClause = "WHERE 1=1";
+    const params = [];
+
+    if (search) {
+      whereClause += " AND (p.name LIKE ? OR p.sku LIKE ? OR p.tags LIKE ?)";
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    if (status) { whereClause += " AND p.status = ?"; params.push(status); }
+    if (category_id) { whereClause += " AND p.category_id = ?"; params.push(category_id); }
+    if (sub_category_id) { whereClause += " AND p.sub_category_id = ?"; params.push(sub_category_id); }
+    if (child_category_id) { whereClause += " AND p.child_category_id = ?"; params.push(child_category_id); }
+    if (featured === "true") { whereClause += " AND p.is_featured = 1"; }
+    if (trending === "true") { whereClause += " AND p.is_trending = 1"; }
+    if (best_seller === "true") { whereClause += " AND p.is_best_seller = 1"; }
+    if (stock_status === "in_stock") { whereClause += " AND p.stock > 0"; }
+    if (stock_status === "out_of_stock") { whereClause += " AND p.stock <= 0"; }
+    if (stock_status === "low_stock") { whereClause += " AND p.stock <= p.low_stock_threshold AND p.stock > 0"; }
+    if (min_price) { whereClause += " AND p.price >= ?"; params.push(min_price); }
+    if (max_price) { whereClause += " AND p.price <= ?"; params.push(max_price); }
+
+    const allowedSorts = ["created_at", "name", "price", "total_sales", "stock"];
+    const sortColumn = allowedSorts.includes(sort) ? `p.${sort}` : "p.created_at";
+    const sortOrder = order === "ASC" ? "ASC" : "DESC";
+
+    const countResult = await query(`SELECT COUNT(*) as total FROM products p ${whereClause}`, params);
+    const total = countResult[0].total;
+
+    const products = await query(
+      `SELECT p.*, 
+        c.name as category_name, sc.name as sub_category_name, cc.name as child_category_name
+       FROM products p 
+       LEFT JOIN categories c ON p.category_id = c.id 
+       LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id 
+       LEFT JOIN child_categories cc ON p.child_category_id = cc.id 
+       ${whereClause} 
+       ORDER BY ${sortColumn} ${sortOrder} 
+       LIMIT ? OFFSET ?`,
+      [...params, String(limit), String(offset)]
+    );
+
+    // Get images and variant metadata for each product
+    const productIds = products.map((p) => p.id);
+    let variantsByProduct = {};
+    if (productIds.length) {
+      const placeholders = productIds.map(() => "?").join(",");
+      const allVariants = await query(
+        `SELECT product_id, sku, option_values, stock, price, offer_price
+         FROM product_variants
+         WHERE product_id IN (${placeholders}) AND status = 'active'`,
+        productIds
+      );
+      for (const variant of allVariants) {
+        if (!variantsByProduct[variant.product_id]) variantsByProduct[variant.product_id] = [];
+        variantsByProduct[variant.product_id].push(variant);
+      }
+    }
+
+    for (const product of products) {
+      const images = await query(
+        "SELECT id, image, image_type, sort_order, alt_text FROM product_images WHERE product_id = ? ORDER BY sort_order ASC",
+        [product.id]
+      );
+      product.images = images;
+      const thumbImg = images.find((img) => img.image_type === "thumbnail") || images[0];
+      product.thumbnail = thumbImg?.image || product.thumbnail || null;
+
+      const productVariants = variantsByProduct[product.id] || [];
+      product.fabric = collectProductFabrics(productVariants);
+      if (productVariants.length) {
+        product.stock = deriveProductStockFromVariants(productVariants);
+        const prices = deriveProductPricesFromVariants(productVariants, product.price, product.offer_price);
+        product.price = prices.price;
+        product.offer_price = prices.offer_price;
+      }
+    }
+
+    return paginatedResponse(res, products, total, page, limit);
+  } catch (error) {
+    logger.error("Get products error:", error);
+    return errorResponse(res, "Failed to fetch products", 500);
+  }
+};
+
+// @desc    Get single product
+// @route   GET /api/products/:id
+export const getProduct = async (req, res) => {
+  try {
+    const products = await query(
+      `SELECT p.*, 
+        c.name as category_name, c.slug as category_slug,
+        sc.name as sub_category_name, sc.slug as sub_category_slug,
+        cc.name as child_category_name, cc.slug as child_category_slug
+       FROM products p 
+       LEFT JOIN categories c ON p.category_id = c.id 
+       LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id 
+       LEFT JOIN child_categories cc ON p.child_category_id = cc.id 
+       WHERE p.id = ?`,
+      [req.params.id]
+    );
+
+    if (!products.length) {
+      return errorResponse(res, "Product not found", 404);
+    }
+
+    const product = products[0];
+    product.images = await query("SELECT id, image, image_type, sort_order, alt_text FROM product_images WHERE product_id = ? ORDER BY sort_order ASC", [product.id]);
+    product.variants = await query("SELECT * FROM product_variants WHERE product_id = ? AND status = 'active'", [product.id]);
+    product.fabric = collectProductFabrics(product.variants);
+    if (product.variants.length) {
+      product.stock = deriveProductStockFromVariants(product.variants);
+      const prices = deriveProductPricesFromVariants(product.variants, product.price, product.offer_price);
+      product.price = prices.price;
+      product.offer_price = prices.offer_price;
+    }
+    const thumbImg = product.images.find((img) => img.image_type === "thumbnail") || product.images[0];
+    product.thumbnail = thumbImg?.image || product.thumbnail || null;
+    product.inventory = await query("SELECT * FROM inventory WHERE product_id = ?", [product.id]);
+    const collectionRows = await query(
+      "SELECT collection_id FROM collection_products WHERE product_id = ? ORDER BY sort_order ASC",
+      [product.id]
+    );
+    product.collection_ids = collectionRows.map((r) => r.collection_id);
+
+    return successResponse(res, product);
+  } catch (error) {
+    logger.error("Get product error:", error);
+    return errorResponse(res, "Failed to fetch product", 500);
+  }
+};
+
+// @desc    Get product by slug
+// @route   GET /api/products/slug/:slug
+export const getProductBySlug = async (req, res) => {
+  try {
+    const products = await query(
+      `SELECT p.*, 
+        c.name as category_name, c.slug as category_slug,
+        sc.name as sub_category_name, sc.slug as sub_category_slug
+       FROM products p 
+       LEFT JOIN categories c ON p.category_id = c.id 
+       LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id 
+       WHERE p.slug = ? AND p.status = 'active'`,
+      [req.params.slug]
+    );
+
+    if (!products.length) {
+      return errorResponse(res, "Product not found", 404);
+    }
+
+    return successResponse(res, products[0]);
+  } catch (error) {
+    logger.error("Get product by slug error:", error);
+    return errorResponse(res, "Failed to fetch product", 500);
+  }
+};
+
+// @desc    Create product
+// @route   POST /api/products
+export const createProduct = async (req, res) => {
+  const conn = await getConnection();
+  try {
+    const {
+      name, slug: slugInput, category_id, sub_category_id, child_category_id,
+      brand, vendor, product_type, price, offer_price, cost_price, stock,
+      short_description, long_description, tags,
+      video_url, gst_percent, shipping_charge,
+      is_featured, is_trending, is_best_seller, is_new_arrival, status,
+      meta_title, meta_description, meta_keywords,
+      variant_options, variants, seo_data, collection_ids,
+    } = req.body;
+
+    const slug = slugInput?.trim()
+      ? await generateUniqueSlug(checkProductSlug, slugInput.trim())
+      : await generateUniqueSlug(checkProductSlug, name);
+    const sku = generateSKU(category_id ? "cat" : "gen", name, Date.now());
+    const discount = calculateDiscount(parseFloat(price), parseFloat(offer_price));
+    const low_stock_threshold = 5;
+    const stockQty = parseStockValue(stock);
+    const stockStatus = stockQty <= 0 ? "out_of_stock" : stockQty <= low_stock_threshold ? "low_stock" : "in_stock";
+
+    await conn.beginTransaction();
+
+    const [result] = await conn.execute(
+      `INSERT INTO products (name, slug, sku, category_id, sub_category_id, child_category_id, brand, vendor, product_type, price, offer_price, discount_percentage, cost_price, stock, stock_status, low_stock_threshold, short_description, long_description, tags, video_url, gst_percent, shipping_charge, is_featured, is_trending, is_best_seller, is_new_arrival, status, meta_title, meta_description, meta_keywords, created_by, updated_by) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        name, slug, sku, category_id || null, sub_category_id || null, child_category_id || null,
+        brand || null, vendor || null, product_type || null,
+        price || 0, offer_price || 0, discount, cost_price || 0, stockQty, stockStatus, low_stock_threshold,
+        short_description || null, long_description || null, tags || null,
+        video_url || null, gst_percent || 0, shipping_charge || 0,
+        is_featured || 0, is_trending || 0, is_best_seller || 0, is_new_arrival || 0, status || "draft",
+        meta_title || null, meta_description || null, meta_keywords || null,
+        req.admin?.id || null, req.admin?.id || null,
+      ]
+    );
+
+    const productId = result.insertId;
+
+    await conn.execute(
+      "INSERT INTO inventory (product_id, quantity, available_quantity, low_stock_threshold) VALUES (?, ?, ?, ?)",
+      [productId, stockQty, stockQty, low_stock_threshold]
+    );
+
+    if (req.files && req.files.length > 0) {
+      const thumbPath = `uploads/products/${req.files[0].filename}`;
+      for (let index = 0; index < req.files.length; index++) {
+        const file = req.files[index];
+        await conn.execute(
+          "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, ?, ?)",
+          [productId, `uploads/products/${file.filename}`, index === 0 ? "thumbnail" : "gallery", index]
+        );
+      }
+      await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [thumbPath, productId]);
+    } else if (req.body.thumbnail) {
+      await conn.execute(
+        "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, 'thumbnail', 0)",
+        [productId, req.body.thumbnail]
+      );
+      await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [req.body.thumbnail, productId]);
+    }
+
+    if (variant_options) {
+      const savedVariants = await saveVariantOptionsAndVariants(
+        conn,
+        productId,
+        variant_options,
+        variants,
+        price,
+        offer_price,
+        stockQty
+      );
+      await applyVariantSyncToProduct(conn, productId, savedVariants, price, offer_price, low_stock_threshold);
+    }
+
+    if (seo_data) {
+      await saveProductSeoData(conn, productId, seo_data);
+    }
+
+    if (collection_ids !== undefined) {
+      await syncProductCollections(conn, productId, collection_ids);
+    }
+
+    await conn.commit();
+
+    const product = await query("SELECT * FROM products WHERE id = ?", [productId]);
+    return successResponse(res, product[0], "Product created successfully", 201);
+  } catch (error) {
+    await conn.rollback();
+    logger.error("Create product error:", error);
+    return errorResponse(res, process.env.NODE_ENV === "development" ? error.message : "Failed to create product", 500);
+  } finally {
+    conn.release();
+  }
+};
+
+// @desc    Update product
+// @route   PUT /api/products/:id
+export const updateProduct = async (req, res) => {
+  const conn = await getConnection();
+  try {
+    const productId = req.params.id;
+    const existing = await query("SELECT * FROM products WHERE id = ?", [productId]);
+    if (!existing.length) return errorResponse(res, "Product not found", 404);
+
+    const {
+      name, slug: slugInput, category_id, sub_category_id, child_category_id,
+      brand, vendor, product_type, price, offer_price, cost_price, stock,
+      short_description, long_description, tags,
+      video_url, gst_percent, shipping_charge,
+      is_featured, is_trending, is_best_seller, is_new_arrival, status,
+      meta_title, meta_description, meta_keywords,
+      variant_options, variants, seo_data, collection_ids,
+    } = req.body;
+
+    let slug = existing[0].slug;
+    if (slugInput?.trim()) {
+      slug = await generateUniqueSlug(checkProductSlug, slugInput.trim(), productId);
+    } else if (name && name !== existing[0].name) {
+      slug = await generateUniqueSlug(checkProductSlug, name, productId);
+    }
+
+    const finalPrice = price !== undefined ? price : existing[0].price;
+    const finalOfferPrice = offer_price !== undefined ? offer_price : existing[0].offer_price;
+    const discount = calculateDiscount(parseFloat(finalPrice), parseFloat(finalOfferPrice));
+    const finalStock = stock !== undefined ? parseStockValue(stock) : existing[0].stock;
+    const low_stock_threshold = existing[0].low_stock_threshold || 5;
+    const stockStatus = finalStock <= 0 ? "out_of_stock" : finalStock <= low_stock_threshold ? "low_stock" : "in_stock";
+
+    const { catId, subId, childId } = resolveCategoryIds(
+      existing[0],
+      category_id,
+      sub_category_id,
+      child_category_id
+    );
+
+    await conn.beginTransaction();
+
+    await conn.execute(
+      `UPDATE products SET 
+        name = ?, slug = ?, category_id = ?, sub_category_id = ?, child_category_id = ?,
+        brand = ?, vendor = ?, product_type = ?,
+        price = ?, offer_price = ?, discount_percentage = ?, cost_price = ?,
+        stock = ?, stock_status = ?,
+        short_description = ?, long_description = ?, tags = ?,
+        video_url = ?, gst_percent = ?, shipping_charge = ?,
+        is_featured = ?, is_trending = ?, is_best_seller = ?, is_new_arrival = ?, status = ?,
+        meta_title = ?, meta_description = ?, meta_keywords = ?, updated_by = ?
+      WHERE id = ?`,
+      [
+        name || existing[0].name, slug,
+        catId, subId, childId,
+        brand !== undefined ? brand : existing[0].brand,
+        vendor !== undefined ? vendor : existing[0].vendor,
+        product_type !== undefined ? product_type : existing[0].product_type,
+        finalPrice, finalOfferPrice,
+        discount, cost_price !== undefined ? cost_price : existing[0].cost_price,
+        finalStock, stockStatus,
+        short_description !== undefined ? short_description : existing[0].short_description,
+        long_description !== undefined ? long_description : existing[0].long_description,
+        tags !== undefined ? tags : existing[0].tags,
+        video_url !== undefined ? video_url : existing[0].video_url,
+        gst_percent !== undefined ? gst_percent : existing[0].gst_percent,
+        shipping_charge !== undefined ? shipping_charge : existing[0].shipping_charge,
+        is_featured !== undefined ? is_featured : existing[0].is_featured,
+        is_trending !== undefined ? is_trending : existing[0].is_trending,
+        is_best_seller !== undefined ? is_best_seller : existing[0].is_best_seller,
+        is_new_arrival !== undefined ? is_new_arrival : existing[0].is_new_arrival,
+        status || existing[0].status,
+        meta_title !== undefined ? meta_title : existing[0].meta_title,
+        meta_description !== undefined ? meta_description : existing[0].meta_description,
+        meta_keywords !== undefined ? meta_keywords : existing[0].meta_keywords,
+        req.admin?.id || null, productId,
+      ]
+    );
+
+    if (req.files && req.files.length > 0) {
+      const [thumbRows] = await conn.execute(
+        "SELECT id FROM product_images WHERE product_id = ? AND image_type = 'thumbnail' LIMIT 1",
+        [productId]
+      );
+      const existingThumbId = thumbRows[0]?.id || null;
+      let thumbPath = null;
+
+      for (let i = 0; i < req.files.length; i++) {
+        const imagePath = `uploads/products/${req.files[i].filename}`;
+        if (i === 0) {
+          thumbPath = imagePath;
+          if (existingThumbId) {
+            await conn.execute("UPDATE product_images SET image = ? WHERE id = ?", [imagePath, existingThumbId]);
+          } else {
+            await conn.execute(
+              "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, 'thumbnail', 0)",
+              [productId, imagePath]
+            );
+          }
+        } else {
+          await conn.execute(
+            "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, 'gallery', ?)",
+            [productId, imagePath, i]
+          );
+        }
+      }
+
+      if (thumbPath) {
+        await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [thumbPath, productId]);
+      }
+    }
+
+    if (variant_options) {
+      const savedVariants = await saveVariantOptionsAndVariants(
+        conn,
+        productId,
+        variant_options,
+        variants,
+        finalPrice,
+        finalOfferPrice,
+        finalStock
+      );
+      await applyVariantSyncToProduct(
+        conn,
+        productId,
+        savedVariants,
+        finalPrice,
+        finalOfferPrice,
+        low_stock_threshold
+      );
+    } else if (stock !== undefined) {
+      await syncProductInventory(conn, productId, finalStock, low_stock_threshold);
+    }
+
+    if (seo_data) {
+      await saveProductSeoData(conn, productId, seo_data);
+    }
+
+    if (collection_ids !== undefined) {
+      await syncProductCollections(conn, productId, collection_ids);
+    }
+
+    await conn.commit();
+
+    const product = await query("SELECT * FROM products WHERE id = ?", [productId]);
+    return successResponse(res, product[0], "Product updated successfully");
+  } catch (error) {
+    await conn.rollback();
+    logger.error("Update product error:", error);
+    return errorResponse(res, process.env.NODE_ENV === "development" ? error.message : "Failed to update product", 500);
+  } finally {
+    conn.release();
+  }
+};
+
+// @desc    Delete product (permanent)
+// @route   DELETE /api/products/:id
+export const deleteProduct = async (req, res) => {
+  try {
+    const existing = await query("SELECT id FROM products WHERE id = ?", [req.params.id]);
+    if (!existing.length) return errorResponse(res, "Product not found", 404);
+    await query("DELETE FROM products WHERE id = ?", [req.params.id]);
+    return successResponse(res, null, "Product deleted successfully");
+  } catch (error) {
+    logger.error("Delete product error:", error);
+    return errorResponse(res, "Failed to delete product", 500);
+  }
+};
+
+// @desc    Bulk delete products
+// @route   POST /api/products/bulk-delete
+export const bulkDeleteProducts = async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids) || !ids.length) {
+      return errorResponse(res, "Product IDs are required", 400);
+    }
+    const placeholders = ids.map(() => "?").join(",");
+    await query(`DELETE FROM products WHERE id IN (${placeholders})`, ids);
+    return successResponse(res, null, `${ids.length} products deleted successfully`);
+  } catch (error) {
+    logger.error("Bulk delete error:", error);
+    return errorResponse(res, "Failed to delete products", 500);
+  }
+};
+
+// @desc    Bulk upload products (Excel/CSV)
+// @route   POST /api/products/bulk-upload
+export const bulkUploadProducts = async (req, res) => {
+  try {
+    const { products } = req.body;
+    if (!products || !Array.isArray(products) || !products.length) {
+      return errorResponse(res, "Products array is required", 400);
+    }
+
+    let created = 0;
+    for (const product of products) {
+      const slug = await generateUniqueSlug(checkProductSlug, product.name);
+      const sku = generateSKU("bulk", product.name, Date.now() + created);
+      const discount = calculateDiscount(parseFloat(product.price), parseFloat(product.offer_price));
+
+      await query(
+        `INSERT INTO products (name, slug, sku, category_id, price, offer_price, discount_percentage, stock, status, created_by) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [product.name, slug, sku, product.category_id || null, product.price || 0, product.offer_price || 0, discount, product.stock || 0, "active", req.admin?.id || null]
+      );
+      created++;
+    }
+
+    return successResponse(res, { created }, `${created} products uploaded successfully`, 201);
+  } catch (error) {
+    logger.error("Bulk upload error:", error);
+    return errorResponse(res, "Failed to upload products", 500);
+  }
+};
+
+// @desc    Toggle featured
+// @route   PUT /api/products/:id/featured
+export const toggleFeatured = async (req, res) => {
+  try {
+    const existing = await query("SELECT id, is_featured FROM products WHERE id = ?", [req.params.id]);
+    if (!existing.length) return errorResponse(res, "Product not found", 404);
+    const newVal = existing[0].is_featured ? 0 : 1;
+    await query("UPDATE products SET is_featured = ? WHERE id = ?", [newVal, req.params.id]);
+    return successResponse(res, { is_featured: newVal }, newVal ? "Product marked as featured" : "Product unmarked as featured");
+  } catch (error) {
+    logger.error("Toggle featured error:", error);
+    return errorResponse(res, "Failed to toggle featured", 500);
+  }
+};
+
+// @desc    Toggle trending
+// @route   PUT /api/products/:id/trending
+export const toggleTrending = async (req, res) => {
+  try {
+    const existing = await query("SELECT id, is_trending FROM products WHERE id = ?", [req.params.id]);
+    if (!existing.length) return errorResponse(res, "Product not found", 404);
+    const newVal = existing[0].is_trending ? 0 : 1;
+    await query("UPDATE products SET is_trending = ? WHERE id = ?", [newVal, req.params.id]);
+    return successResponse(res, { is_trending: newVal }, newVal ? "Product marked as trending" : "Product unmarked as trending");
+  } catch (error) {
+    logger.error("Toggle trending error:", error);
+    return errorResponse(res, "Failed to toggle trending", 500);
+  }
+};
+
+// @desc    Toggle best seller
+// @route   PUT /api/products/:id/best-seller
+export const toggleBestSeller = async (req, res) => {
+  try {
+    const existing = await query("SELECT id, is_best_seller FROM products WHERE id = ?", [req.params.id]);
+    if (!existing.length) return errorResponse(res, "Product not found", 404);
+    const newVal = existing[0].is_best_seller ? 0 : 1;
+    await query("UPDATE products SET is_best_seller = ? WHERE id = ?", [newVal, req.params.id]);
+    return successResponse(res, { is_best_seller: newVal }, newVal ? "Product marked as best seller" : "Product unmarked as best seller");
+  } catch (error) {
+    logger.error("Toggle best seller error:", error);
+    return errorResponse(res, "Failed to toggle best seller", 500);
+  }
+};
+
+// @desc    Update product status
+// @route   PUT /api/products/:id/status
+export const updateProductStatus = async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!["active", "inactive", "draft"].includes(status)) {
+      return errorResponse(res, "Invalid status", 400);
+    }
+    const existing = await query("SELECT id FROM products WHERE id = ?", [req.params.id]);
+    if (!existing.length) return errorResponse(res, "Product not found", 404);
+    await query("UPDATE products SET status = ? WHERE id = ?", [status, req.params.id]);
+    return successResponse(res, { status }, "Product status updated");
+  } catch (error) {
+    logger.error("Update product status error:", error);
+    return errorResponse(res, "Failed to update status", 500);
+  }
+};
+
+// @desc    Update stock
+// @route   PUT /api/products/:id/stock
+export const updateStock = async (req, res) => {
+  try {
+    const { stock } = req.body;
+    if (stock === undefined || stock < 0) {
+      return errorResponse(res, "Valid stock quantity is required", 400);
+    }
+    const existing = await query("SELECT id, stock FROM products WHERE id = ?", [req.params.id]);
+    if (!existing.length) return errorResponse(res, "Product not found", 404);
+
+    const previousStock = existing[0].stock;
+    await query("UPDATE products SET stock = ? WHERE id = ?", [stock, req.params.id]);
+    await query("UPDATE inventory SET quantity = ?, available_quantity = ? WHERE product_id = ?", [stock, stock, req.params.id]);
+
+    // Log inventory change
+    await query(
+      "INSERT INTO inventory_logs (product_id, type, quantity, previous_quantity, new_quantity, reference_type, notes, created_by) VALUES (?, 'adjustment', ?, ?, ?, 'manual', ?, ?)",
+      [req.params.id, stock - previousStock, previousStock, stock, "Stock updated manually", req.admin?.id || null]
+    );
+
+    return successResponse(res, { stock }, "Stock updated successfully");
+  } catch (error) {
+    logger.error("Update stock error:", error);
+    return errorResponse(res, "Failed to update stock", 500);
+  }
+};
+
+// @desc    Delete product image
+// @route   DELETE /api/products/:id/images/:imageId
+export const deleteProductImage = async (req, res) => {
+  try {
+    const { id, imageId } = req.params;
+    const images = await query("SELECT id, image FROM product_images WHERE id = ? AND product_id = ?", [imageId, id]);
+    if (!images.length) return errorResponse(res, "Image not found", 404);
+    await query("DELETE FROM product_images WHERE id = ?", [imageId]);
+    return successResponse(res, null, "Image deleted successfully");
+  } catch (error) {
+    logger.error("Delete product image error:", error);
+    return errorResponse(res, "Failed to delete image", 500);
+  }
+};
+
+// @desc    Export products to Excel
+// @route   GET /api/products/export/excel
+export const exportProductsExcel = async (req, res) => {
+  try {
+    const products = await query(
+      `SELECT p.name, p.sku, p.price, p.offer_price, p.discount_percentage, p.stock, 
+        p.brand, p.status, p.total_sales, c.name as category
+       FROM products p 
+       LEFT JOIN categories c ON p.category_id = c.id 
+       ORDER BY p.name ASC`
+    );
+
+    return successResponse(res, products);
+  } catch (error) {
+    logger.error("Export products error:", error);
+    return errorResponse(res, "Failed to export products", 500);
+  }
+};
+
+// ============================================================
+// PRODUCT VARIANT OPTIONS CRUD
+// ============================================================
+
+// @desc    Get variant options for a product
+// @route   GET /api/products/:productId/variant-options
+export const getVariantOptions = async (req, res) => {
+  try {
+    const options = await query(
+      "SELECT * FROM product_variant_options WHERE product_id = ? ORDER BY sort_order ASC",
+      [req.params.productId]
+    );
+    return successResponse(res, options);
+  } catch (error) {
+    logger.error("Get variant options error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to fetch variant options", 500);
+  }
+};
+
+// @desc    Create variant option (e.g. Size: [S, M, L])
+// @route   POST /api/products/:productId/variant-options
+export const createVariantOption = async (req, res) => {
+  try {
+    const { option_name, option_values, sort_order } = req.body;
+    if (!option_name || !option_values) {
+      return errorResponse(res, "Option name and values are required", 400);
+    }
+
+    const values = Array.isArray(option_values) ? option_values : JSON.parse(option_values);
+    const result = await query(
+      "INSERT INTO product_variant_options (product_id, option_name, option_values, sort_order) VALUES (?, ?, ?, ?)",
+      [req.params.productId, option_name, JSON.stringify(values), sort_order || 0]
+    );
+
+    const option = await query("SELECT * FROM product_variant_options WHERE id = ?", [result.insertId]);
+    return successResponse(res, option[0], "Variant option created", 201);
+  } catch (error) {
+    logger.error("Create variant option error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to create variant option", 500);
+  }
+};
+
+// @desc    Update variant option
+// @route   PUT /api/products/:productId/variant-options/:optionId
+export const updateVariantOption = async (req, res) => {
+  try {
+    const { option_name, option_values, sort_order } = req.body;
+    const existing = await query(
+      "SELECT id FROM product_variant_options WHERE id = ? AND product_id = ?",
+      [req.params.optionId, req.params.productId]
+    );
+    if (!existing.length) return errorResponse(res, "Variant option not found", 404);
+
+    const updates = [];
+    const params = [];
+    if (option_name !== undefined) {
+      updates.push("option_name = ?");
+      params.push(option_name);
+    }
+    if (option_values !== undefined) {
+      const values = Array.isArray(option_values) ? option_values : JSON.parse(option_values);
+      updates.push("option_values = ?");
+      params.push(JSON.stringify(values));
+    }
+    if (sort_order !== undefined) {
+      updates.push("sort_order = ?");
+      params.push(sort_order);
+    }
+
+    if (updates.length) {
+      params.push(req.params.optionId);
+      await query(`UPDATE product_variant_options SET ${updates.join(", ")} WHERE id = ?`, params);
+    }
+
+    const option = await query("SELECT * FROM product_variant_options WHERE id = ?", [req.params.optionId]);
+    return successResponse(res, option[0], "Variant option updated");
+  } catch (error) {
+    logger.error("Update variant option error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to update variant option", 500);
+  }
+};
+
+// @desc    Delete variant option
+// @route   DELETE /api/products/:productId/variant-options/:optionId
+export const deleteVariantOption = async (req, res) => {
+  try {
+    const existing = await query(
+      "SELECT id FROM product_variant_options WHERE id = ? AND product_id = ?",
+      [req.params.optionId, req.params.productId]
+    );
+    if (!existing.length) return errorResponse(res, "Variant option not found", 404);
+
+    await query("DELETE FROM product_variant_options WHERE id = ?", [req.params.optionId]);
+    return successResponse(res, null, "Variant option deleted");
+  } catch (error) {
+    logger.error("Delete variant option error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to delete variant option", 500);
+  }
+};
+
+// @desc    Auto-generate variant combinations from options
+// @route   POST /api/products/:productId/variant-combinations/generate
+export const generateVariantCombinations = async (req, res) => {
+  try {
+    const productId = req.params.productId;
+    const [product] = await query("SELECT id, price, offer_price FROM products WHERE id = ?", [productId]);
+    if (!product) return errorResponse(res, "Product not found", 404);
+
+    const options = await query(
+      "SELECT * FROM product_variant_options WHERE product_id = ? ORDER BY sort_order ASC",
+      [productId]
+    );
+    if (options.length === 0) {
+      return errorResponse(res, "No variant options defined for this product", 400);
+    }
+
+    // Generate Cartesian product of all option values
+    const optionArrays = options.map((opt) => ({
+      name: opt.option_name,
+      values: JSON.parse(opt.option_values),
+    }));
+
+    const cartesian = (arr) => {
+      return arr.reduce((acc, curr) => {
+        return acc.flatMap((a) => curr.values.map((v) => [...a, { name: curr.name, value: v }]));
+      }, [[]]);
+    };
+
+    const combinations = cartesian(optionArrays);
+
+    // Delete existing combinations, then insert new ones
+    await query("DELETE FROM product_variants WHERE product_id = ?", [productId]);
+
+    let count = 0;
+    for (const combo of combinations) {
+      const { size, color, optionValues } = resolveVariantDimensions(combo);
+      const sku = `VAR-${productId}-${String(count).padStart(3, "0")}`;
+
+      await query(
+        "INSERT INTO product_variants (product_id, sku, size, color, option_values, price, offer_price, stock, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+        [productId, sku, size, color, optionValues, product.price, product.offer_price, 0]
+      );
+      count++;
+    }
+
+    const variants = await query(
+      "SELECT * FROM product_variants WHERE product_id = ? ORDER BY id ASC",
+      [productId]
+    );
+
+    return successResponse(res, { variants, generated: count }, `${count} variant combinations generated`);
+  } catch (error) {
+    logger.error("Generate variant combinations error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to generate variant combinations", 500);
+  }
+};
+
+// @desc    Update a variant combination
+// @route   PUT /api/products/:productId/variants/:variantId
+export const updateVariant = async (req, res) => {
+  try {
+    const variantId = req.params.variantId;
+    const existing = await query("SELECT id FROM product_variants WHERE id = ? AND product_id = ?", [variantId, req.params.productId]);
+    if (!existing.length) return errorResponse(res, "Variant not found", 404);
+
+    const { sku, size, color, price, offer_price, stock, image, status, options } = req.body;
+    const updates = [];
+    const params = [];
+
+    if (sku !== undefined) { updates.push("sku = ?"); params.push(sku); }
+    if (options !== undefined) {
+      const parsed = parseJsonField(options) || options;
+      const { size: s, color: c, optionValues } = resolveVariantDimensions(parsed);
+      updates.push("size = ?"); params.push(s);
+      updates.push("color = ?"); params.push(c);
+      updates.push("option_values = ?"); params.push(optionValues);
+    } else {
+      if (size !== undefined) { updates.push("size = ?"); params.push(size); }
+      if (color !== undefined) { updates.push("color = ?"); params.push(color); }
+    }
+    if (price !== undefined) { updates.push("price = ?"); params.push(price); }
+    if (offer_price !== undefined) { updates.push("offer_price = ?"); params.push(offer_price); }
+    if (stock !== undefined) { updates.push("stock = ?"); params.push(stock); }
+    if (image !== undefined) { updates.push("image = ?"); params.push(image); }
+    if (status !== undefined) { updates.push("status = ?"); params.push(status); }
+
+    if (!updates.length) return errorResponse(res, "No fields to update", 400);
+
+    params.push(variantId);
+    await query(`UPDATE product_variants SET ${updates.join(", ")} WHERE id = ?`, params);
+
+    const variant = await query("SELECT * FROM product_variants WHERE id = ?", [variantId]);
+    return successResponse(res, variant[0], "Variant updated");
+  } catch (error) {
+    logger.error("Update variant error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to update variant", 500);
+  }
+};
+
+// @desc    Delete a variant
+// @route   DELETE /api/products/:productId/variants/:variantId
+export const deleteVariant = async (req, res) => {
+  try {
+    const { productId, variantId } = req.params;
+    const existing = await query(
+      "SELECT id FROM product_variants WHERE id = ? AND product_id = ?",
+      [variantId, productId]
+    );
+    if (!existing.length) return errorResponse(res, "Variant not found", 404);
+
+    await query("DELETE FROM product_variants WHERE id = ?", [variantId]);
+    return successResponse(res, null, "Variant deleted");
+  } catch (error) {
+    logger.error("Delete variant error:", error);
+    return errorResponse(res, process.env.NODE_ENV === "development" ? error.message : "Failed to delete variant", 500);
+  }
+};
+
+// ============================================================
+// PRODUCT SEO CRUD
+// ============================================================
+
+// @desc    Get SEO data for a product
+// @route   GET /api/products/:productId/seo
+export const getProductSeo = async (req, res) => {
+  try {
+    const [seo] = await query("SELECT * FROM product_seo WHERE product_id = ?", [req.params.productId]);
+    return successResponse(res, seo || null);
+  } catch (error) {
+    logger.error("Get product SEO error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to fetch product SEO", 500);
+  }
+};
+
+// @desc    Create or update SEO data for a product
+// @route   PUT /api/products/:productId/seo
+export const updateProductSeo = async (req, res) => {
+  try {
+    const productId = req.params.productId;
+    const [product] = await query("SELECT id FROM products WHERE id = ?", [productId]);
+    if (!product) return errorResponse(res, "Product not found", 404);
+
+    const {
+      seo_title, seo_description, keywords, canonical_url, meta_robots,
+      og_title, og_description, og_image,
+      twitter_title, twitter_description, twitter_image,
+    } = req.body;
+
+    const [existing] = await query("SELECT id FROM product_seo WHERE product_id = ?", [productId]);
+
+    if (existing) {
+      await query(
+        `UPDATE product_seo SET
+          seo_title = ?, seo_description = ?, keywords = ?, canonical_url = ?, meta_robots = ?,
+          og_title = ?, og_description = ?, og_image = ?,
+          twitter_title = ?, twitter_description = ?, twitter_image = ?
+        WHERE product_id = ?`,
+        [
+          seo_title || null, seo_description || null, keywords || null, canonical_url || null, meta_robots || "index,follow",
+          og_title || null, og_description || null, og_image || null,
+          twitter_title || null, twitter_description || null, twitter_image || null,
+          productId,
+        ]
+      );
+    } else {
+      await query(
+        `INSERT INTO product_seo (product_id, seo_title, seo_description, keywords, canonical_url, meta_robots,
+          og_title, og_description, og_image, twitter_title, twitter_description, twitter_image)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          productId, seo_title || null, seo_description || null, keywords || null, canonical_url || null, meta_robots || "index,follow",
+          og_title || null, og_description || null, og_image || null,
+          twitter_title || null, twitter_description || null, twitter_image || null,
+        ]
+      );
+    }
+
+    const [seo] = await query("SELECT * FROM product_seo WHERE product_id = ?", [productId]);
+    return successResponse(res, seo, "Product SEO saved successfully");
+  } catch (error) {
+    logger.error("Update product SEO error:", error);
+    return errorResponse(res, process.env.NODE_ENV === 'development' ? error.message : "Failed to update product SEO", 500);
+  }
+};

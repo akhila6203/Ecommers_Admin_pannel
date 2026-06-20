@@ -1,0 +1,78 @@
+{
+  "clientName": "Thunder Client",
+  "collectionName": "LM Shopping Mall API",
+  "collectionId": "lm-shopping-mall-api",
+  "dateExported": "2026-06-17",
+  "version": "1.0",
+  "folders": [
+    {
+      "name": "Auth",
+      "requests": [
+        {
+          "name": "Login",
+          "method": "POST",
+          "url": "http://localhost:5000/api/auth/login",
+          "headers": [{ "name": "Content-Type", "value": "application/json" }],
+          "body": { "type": "json", "raw": "{\n  \"email\": \"admin@lms.com\",\n  \"password\": \"admin123\"\n}" }
+        },
+        {
+          "name": "Profile",
+          "method": "GET",
+          "url": "http://localhost:5000/api/auth/profile",
+          "headers": [{ "name": "Authorization", "value": "Bearer {{token}}" }]
+        }
+      ]
+    },
+    {
+      "name": "Settings",
+      "requests": [
+        {
+          "name": "Get Store Information",
+          "method": "GET",
+          "url": "http://localhost:5000/api/settings/store-information",
+          "headers": [{ "name": "Authorization", "value": "Bearer {{token}}" }]
+        },
+        {
+          "name": "Update Store Information",
+          "method": "PUT",
+          "url": "http://localhost:5000/api/settings/store-information",
+          "headers": [
+            { "name": "Authorization", "value": "Bearer {{token}}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ],
+          "body": { "type": "json", "raw": "{\n  \"companyName\": \"LM Store\",\n  \"contactEmail\": \"contact@lm.com\"\n}" }
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "requests": [
+        {
+          "name": "List Products",
+          "method": "GET",
+          "url": "http://localhost:5000/api/products?limit=10"
+        }
+      ]
+    },
+    {
+      "name": "Categories",
+      "requests": [
+        {
+          "name": "Hierarchy",
+          "method": "GET",
+          "url": "http://localhost:5000/api/categories/hierarchy"
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "requests": [
+        {
+          "name": "Health Check",
+          "method": "GET",
+          "url": "http://localhost:5000/api/health"
+        }
+      ]
+    }
+  ]
+}

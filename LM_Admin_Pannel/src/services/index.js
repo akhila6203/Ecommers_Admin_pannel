@@ -1,0 +1,10 @@
+export * as authService from "./authService";
+export * as dashboardService from "./dashboardService";
+export * as categoryService from "./categoryService";
+export * as productService from "./productService";
+export * as orderService from "./orderService";
+export * as settingsService from "./settingsService";
+export * as bannerService from "./bannerService";
+export * as couponService from "./couponService";
+export * as customerService from "./customerService";
+export * as collectionService from "./collectionService";

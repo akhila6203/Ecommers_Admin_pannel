@@ -1,0 +1,303 @@
+import { query, getConnection } from "../config/db.js";
+import { generateOrderNumber, generateInvoiceNumber } from "../helpers/generateHelper.js";
+import { successResponse, errorResponse, paginatedResponse } from "../helpers/responseHelper.js";
+import { recordCouponUsage } from "./couponController.js";
+import logger from "../config/logger.js";
+
+// @desc    Get all orders
+// @route   GET /api/orders
+export const getOrders = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+    const search = req.query.search || "";
+    const status = req.query.status || "";
+    const payment_status = req.query.payment_status || "";
+    const start_date = req.query.start_date || "";
+    const end_date = req.query.end_date || "";
+    const sort = req.query.sort || "created_at";
+    const order = req.query.order || "DESC";
+
+    let whereClause = "WHERE 1=1";
+    const params = [];
+
+    if (search) {
+      whereClause += " AND (o.order_number LIKE ? OR o.email LIKE ? OR o.phone LIKE ? OR o.shipping_name LIKE ?)";
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    if (status) { whereClause += " AND o.order_status = ?"; params.push(status); }
+    if (payment_status) { whereClause += " AND o.payment_status = ?"; params.push(payment_status); }
+    if (start_date) { whereClause += " AND o.created_at >= ?"; params.push(start_date); }
+    if (end_date) { whereClause += " AND o.created_at <= ?"; params.push(end_date + " 23:59:59"); }
+
+    const allowedSorts = ["created_at", "total_amount", "order_status", "order_number"];
+    const sortColumn = allowedSorts.includes(sort) ? `o.${sort}` : "o.created_at";
+    const sortOrder = order === "ASC" ? "ASC" : "DESC";
+
+    const countResult = await query(`SELECT COUNT(*) as total FROM orders o ${whereClause}`, params);
+    const total = countResult[0].total;
+
+    const orders = await query(
+      `SELECT o.*, c.first_name, c.last_name, c.email as customer_email,
+        (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) as items_count
+       FROM orders o
+       LEFT JOIN customers c ON o.customer_id = c.id
+       ${whereClause}
+       ORDER BY ${sortColumn} ${sortOrder}
+       LIMIT ? OFFSET ?`,
+      [...params, String(limit), String(offset)]
+    );
+
+    return paginatedResponse(res, orders, total, page, limit);
+  } catch (error) {
+    logger.error("Get orders error:", error);
+    return errorResponse(res, "Failed to fetch orders", 500);
+  }
+};
+
+// @desc    Get single order
+// @route   GET /api/orders/:id
+export const getOrder = async (req, res) => {
+  try {
+    const orders = await query("SELECT * FROM orders WHERE id = ?", [req.params.id]);
+    if (!orders.length) return errorResponse(res, "Order not found", 404);
+
+    const order = orders[0];
+    order.items = await query("SELECT * FROM order_items WHERE order_id = ?", [order.id]);
+    order.timeline = await query("SELECT * FROM order_timeline WHERE order_id = ? ORDER BY created_at ASC", [order.id]);
+    order.notes = await query("SELECT * FROM order_notes WHERE order_id = ? ORDER BY created_at DESC", [order.id]);
+
+    if (order.customer_id) {
+      const customers = await query("SELECT id, first_name, last_name, email, phone FROM customers WHERE id = ?", [order.customer_id]);
+      order.customer = customers.length ? customers[0] : null;
+    }
+
+    return successResponse(res, order);
+  } catch (error) {
+    logger.error("Get order error:", error);
+    return errorResponse(res, "Failed to fetch order", 500);
+  }
+};
+
+// @desc    Create order (admin)
+// @route   POST /api/orders
+export const createOrder = async (req, res) => {
+  const connection = await getConnection();
+  try {
+    await connection.beginTransaction();
+    const {
+      customer_id, email, phone, items,
+      shipping_name, shipping_phone, shipping_address, shipping_city, shipping_state, shipping_pincode,
+      billing_name, billing_phone, billing_address, billing_city, billing_state, billing_pincode,
+      subtotal, discount_amount, shipping_charge, tax_amount, total_amount,
+      payment_method, payment_status, coupon_code, notes,
+    } = req.body;
+
+    const orderNumber = generateOrderNumber();
+
+    const result = await connection.query(
+      `INSERT INTO orders (order_number, customer_id, email, phone, shipping_name, shipping_phone, shipping_address, shipping_city, shipping_state, shipping_pincode, billing_name, billing_phone, billing_address, billing_city, billing_state, billing_pincode, subtotal, discount_amount, shipping_charge, tax_amount, total_amount, payment_method, payment_status, coupon_code, notes, created_by, is_cod) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [orderNumber, customer_id || null, email || null, phone || null, shipping_name, shipping_phone, shipping_address, shipping_city, shipping_state, shipping_pincode, billing_name || shipping_name, billing_phone || shipping_phone, billing_address || shipping_address, billing_city || shipping_city, billing_state || shipping_state, billing_pincode || shipping_pincode, subtotal || 0, discount_amount || 0, shipping_charge || 0, tax_amount || 0, total_amount || 0, payment_method || "cod", payment_status || "pending", coupon_code || null, notes || null, req.admin?.id || null, payment_method === "cod" ? 1 : 0]
+    );
+
+    const orderId = result[0].insertId;
+
+    // Insert order items
+    if (items && items.length) {
+      for (const item of items) {
+        await connection.query(
+          "INSERT INTO order_items (order_id, product_id, product_name, product_sku, variant_id, variant_info, quantity, price, offer_price, total_price, gst_percent, gst_amount, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [orderId, item.product_id, item.product_name, item.sku || null, item.variant_id || null, item.variant_info ? JSON.stringify(item.variant_info) : null, item.quantity, item.price, item.offer_price || null, item.total_price, item.gst_percent || 0, item.gst_amount || 0, item.image || null]
+        );
+
+        // Update product stock
+        if (item.product_id) {
+          await connection.query("UPDATE products SET stock = stock - ? WHERE id = ?", [item.quantity, item.product_id]);
+          await connection.query("UPDATE inventory SET quantity = quantity - ?, available_quantity = available_quantity - ? WHERE product_id = ?", [item.quantity, item.quantity, item.product_id]);
+          if (item.variant_id) {
+            await connection.query("UPDATE product_variants SET stock = GREATEST(stock - ?, 0) WHERE id = ?", [item.quantity, item.variant_id]);
+          }
+          await connection.query("INSERT INTO inventory_logs (product_id, type, quantity, reference_type, reference_id, notes) VALUES (?, 'sale', ?, 'order', ?, ?)", [item.product_id, -item.quantity, orderId, `Order #${orderNumber}`]);
+        }
+      }
+    }
+
+    // Add timeline entry
+    await connection.query(
+      "INSERT INTO order_timeline (order_id, status, note, created_by) VALUES (?, 'pending', 'Order created', ?)",
+      [orderId, req.admin?.id || null]
+    );
+
+    if (coupon_code) {
+      await recordCouponUsage(connection, {
+        couponCode: coupon_code,
+        customerId: customer_id,
+        orderId,
+        discountAmount: discount_amount || 0,
+      });
+    }
+
+    await connection.commit();
+    const order = await query("SELECT * FROM orders WHERE id = ?", [orderId]);
+    return successResponse(res, order[0], "Order created successfully", 201);
+  } catch (error) {
+    await connection.rollback();
+    logger.error("Create order error:", error);
+    return errorResponse(res, "Failed to create order", 500);
+  } finally {
+    connection.release();
+  }
+};
+
+// @desc    Update order status
+// @route   PUT /api/orders/:id/status
+export const updateOrderStatus = async (req, res) => {
+  try {
+    const { status, note } = req.body;
+    const validStatuses = ["pending", "confirmed", "packed", "shipped", "delivered", "cancelled", "returned", "refunded"];
+
+    if (!validStatuses.includes(status)) {
+      return errorResponse(res, "Invalid order status", 400);
+    }
+
+    const existing = await query("SELECT * FROM orders WHERE id = ?", [req.params.id]);
+    if (!existing.length) return errorResponse(res, "Order not found", 404);
+
+    const updateData = { order_status: status };
+    if (status === "delivered") updateData.delivered_at = new Date();
+    if (status === "delivered" && !existing[0].invoice_number) {
+      updateData.invoice_number = generateInvoiceNumber(existing[0].id);
+      updateData.invoice_generated_at = new Date();
+    }
+
+    await query("UPDATE orders SET order_status = ?, delivered_at = COALESCE(?, delivered_at), invoice_number = COALESCE(?, invoice_number), invoice_generated_at = COALESCE(?, invoice_generated_at) WHERE id = ?",
+      [status, status === "delivered" ? new Date() : null, updateData.invoice_number || null, updateData.invoice_generated_at || null, req.params.id]
+    );
+
+    // Add timeline
+    await query("INSERT INTO order_timeline (order_id, status, note, created_by) VALUES (?, ?, ?, ?)",
+      [req.params.id, status, note || `Order status changed to ${status}`, req.admin?.id || null]
+    );
+
+    // Update product sales if delivered
+    if (status === "delivered" && existing[0].order_status !== "delivered") {
+      const items = await query("SELECT product_id, quantity FROM order_items WHERE order_id = ?", [req.params.id]);
+      for (const item of items) {
+        if (item.product_id) {
+          await query("UPDATE products SET total_sales = total_sales + ? WHERE id = ?", [item.quantity, item.product_id]);
+        }
+      }
+    }
+
+    // If cancelled or returned, restore stock
+    if ((status === "cancelled" || status === "returned") && existing[0].order_status !== "cancelled" && existing[0].order_status !== "returned") {
+      const items = await query("SELECT product_id, variant_id, quantity FROM order_items WHERE order_id = ?", [req.params.id]);
+      for (const item of items) {
+        if (item.product_id) {
+          await query("UPDATE products SET stock = stock + ? WHERE id = ?", [item.quantity, item.product_id]);
+          await query("UPDATE inventory SET quantity = quantity + ?, available_quantity = available_quantity + ? WHERE product_id = ?", [item.quantity, item.quantity, item.product_id]);
+          if (item.variant_id) {
+            await query("UPDATE product_variants SET stock = stock + ? WHERE id = ?", [item.quantity, item.variant_id]);
+          }
+          await query("INSERT INTO inventory_logs (product_id, type, quantity, reference_type, reference_id, notes) VALUES (?, 'return', ?, 'order', ?, ?)",
+            [item.product_id, item.quantity, req.params.id, `Order ${status}`]);
+        }
+      }
+    }
+
+    return successResponse(res, { order_status: status }, "Order status updated successfully");
+  } catch (error) {
+    logger.error("Update order status error:", error);
+    return errorResponse(res, "Failed to update order status", 500);
+  }
+};
+
+// @desc    Update payment status
+// @route   PUT /api/orders/:id/payment
+export const updatePaymentStatus = async (req, res) => {
+  try {
+    const { payment_status, payment_id } = req.body;
+    const validStatuses = ["pending", "paid", "failed", "refunded", "partially_refunded"];
+    if (!validStatuses.includes(payment_status)) {
+      return errorResponse(res, "Invalid payment status", 400);
+    }
+    await query("UPDATE orders SET payment_status = ?, payment_id = COALESCE(?, payment_id), is_paid = ? WHERE id = ?",
+      [payment_status, payment_id || null, payment_status === "paid" ? 1 : 0, req.params.id]
+    );
+    await query("INSERT INTO order_timeline (order_id, status, note, created_by) VALUES (?, ?, ?, ?)",
+      [req.params.id, `payment_${payment_status}`, `Payment status changed to ${payment_status}`, req.admin?.id || null]
+    );
+    return successResponse(res, { payment_status }, "Payment status updated");
+  } catch (error) {
+    logger.error("Update payment error:", error);
+    return errorResponse(res, "Failed to update payment status", 500);
+  }
+};
+
+// @desc    Add order note
+// @route   POST /api/orders/:id/notes
+export const addOrderNote = async (req, res) => {
+  try {
+    const { note, note_type, is_visible_to_customer } = req.body;
+    if (!note) return errorResponse(res, "Note is required", 400);
+    await query("INSERT INTO order_notes (order_id, note, note_type, created_by, is_visible_to_customer) VALUES (?, ?, ?, ?, ?)",
+      [req.params.id, note, note_type || "admin", req.admin?.id || null, is_visible_to_customer || 0]
+    );
+    return successResponse(res, null, "Note added successfully", 201);
+  } catch (error) {
+    logger.error("Add order note error:", error);
+    return errorResponse(res, "Failed to add note", 500);
+  }
+};
+
+// @desc    Generate invoice
+// @route   GET /api/orders/:id/invoice
+export const generateInvoice = async (req, res) => {
+  try {
+    const orders = await query("SELECT * FROM orders WHERE id = ?", [req.params.id]);
+    if (!orders.length) return errorResponse(res, "Order not found", 404);
+
+    const order = orders[0];
+    if (!order.invoice_number) {
+      const invoiceNumber = generateInvoiceNumber(order.id);
+      await query("UPDATE orders SET invoice_number = ?, invoice_generated_at = NOW() WHERE id = ?", [invoiceNumber, order.id]);
+      order.invoice_number = invoiceNumber;
+    }
+
+    order.items = await query("SELECT * FROM order_items WHERE order_id = ?", [order.id]);
+    return successResponse(res, order, "Invoice generated");
+  } catch (error) {
+    logger.error("Generate invoice error:", error);
+    return errorResponse(res, "Failed to generate invoice", 500);
+  }
+};
+
+// @desc    Delete order
+// @route   DELETE /api/orders/:id
+export const deleteOrder = async (req, res) => {
+  try {
+    await query("DELETE FROM orders WHERE id = ?", [req.params.id]);
+    return successResponse(res, null, "Order deleted");
+  } catch (error) {
+    logger.error("Delete order error:", error);
+    return errorResponse(res, "Failed to delete order", 500);
+  }
+};
+
+// @desc    Export orders
+// @route   GET /api/orders/export
+export const exportOrders = async (req, res) => {
+  try {
+    const orders = await query(
+      `SELECT o.order_number, o.order_status, o.payment_status, o.total_amount, o.shipping_name, o.shipping_city, o.created_at,
+        c.first_name, c.last_name, c.email as customer_email
+       FROM orders o LEFT JOIN customers c ON o.customer_id = c.id
+       WHERE 1=1 ORDER BY o.created_at DESC`
+    );
+    return successResponse(res, orders);
+  } catch (error) {
+    logger.error("Export orders error:", error);
+    return errorResponse(res, "Failed to export orders", 500);
+  }
+};

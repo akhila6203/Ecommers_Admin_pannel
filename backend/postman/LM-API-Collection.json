@@ -1,0 +1,96 @@
+{
+  "info": {
+    "name": "LM Shopping Mall API",
+    "description": "Complete API collection for LM Shopping Mall backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000/api" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": ["if (pm.response.json().data?.token) { pm.collectionVariables.set('token', pm.response.json().data.token); }"]
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"email\":\"admin@lms.com\",\"password\":\"admin123\"}" },
+            "url": "{{baseUrl}}/auth/login"
+          }
+        },
+        { "name": "Profile", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/auth/profile" } },
+        { "name": "Logout", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/auth/logout" } }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        { "name": "Stats", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/dashboard/stats" } },
+        { "name": "Revenue", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/dashboard/revenue?period=monthly" } }
+      ]
+    },
+    {
+      "name": "Categories",
+      "item": [
+        { "name": "Hierarchy (public)", "request": { "method": "GET", "url": "{{baseUrl}}/categories/hierarchy" } },
+        { "name": "Create Category", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"name\":\"New Category\"}" }, "url": "{{baseUrl}}/categories" } },
+        { "name": "Update Category", "request": { "method": "PUT", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"name\":\"Updated Category\"}" }, "url": "{{baseUrl}}/categories/1" } },
+        { "name": "Delete Category", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/categories/1" } }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        { "name": "List Products", "request": { "method": "GET", "url": "{{baseUrl}}/products?limit=10" } },
+        { "name": "Get Product", "request": { "method": "GET", "url": "{{baseUrl}}/products/1" } },
+        { "name": "Delete Product", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/products/1" } }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        { "name": "List Orders", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/orders?limit=10" } },
+        { "name": "Update Order Status", "request": { "method": "PUT", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"status\":\"shipped\"}" }, "url": "{{baseUrl}}/orders/1/status" } }
+      ]
+    },
+    {
+      "name": "Settings",
+      "item": [
+        { "name": "Store Information", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/settings/store-information" } },
+        { "name": "Update Store Information", "request": { "method": "PUT", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"companyName\":\"LM Store\",\"contactEmail\":\"contact@lm.com\"}" }, "url": "{{baseUrl}}/settings/store-information" } },
+        { "name": "About Us", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/settings/about-us" } },
+        { "name": "Privacy Policy", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/settings/privacy-policy" } },
+        { "name": "Terms", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/settings/terms-conditions" } },
+        { "name": "Contact Page", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/settings/contact-page" } }
+      ]
+    },
+    {
+      "name": "Coupons",
+      "item": [
+        { "name": "List Coupons", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/coupons" } },
+        { "name": "Validate Coupon (public)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"code\":\"SAVE10\",\"orderTotal\":1000}" }, "url": "{{baseUrl}}/coupons/validate" } }
+      ]
+    },
+    {
+      "name": "Media",
+      "item": [
+        { "name": "List Media", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/media?limit=20" } }
+      ]
+    },
+    {
+      "name": "Health",
+      "item": [
+        { "name": "Health Check", "request": { "method": "GET", "url": "{{baseUrl}}/health" } }
+      ]
+    }
+  ]
+}
