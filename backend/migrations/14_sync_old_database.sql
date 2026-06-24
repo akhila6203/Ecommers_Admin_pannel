@@ -103,10 +103,19 @@ ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS option_values longtext CHA
 -- coupon_usage: ensure discount_amount exists; migrate legacy coupon_usages data
 ALTER TABLE coupon_usage ADD COLUMN IF NOT EXISTS discount_amount decimal(10,2) DEFAULT 0.00;
 
-INSERT IGNORE INTO coupon_usage (store_id, coupon_id, customer_id, order_id, used_at)
-SELECT 1, coupon_id, customer_id, order_id, used_at
-FROM coupon_usages
-WHERE EXISTS (SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'lms' AND TABLE_NAME = 'coupon_usages');
+SET @coupon_usages_exists = (
+  SELECT COUNT(*) FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coupon_usages'
+);
+SET @sql_coupon_migrate = IF(
+  @coupon_usages_exists > 0,
+  'INSERT IGNORE INTO coupon_usage (store_id, coupon_id, customer_id, order_id, used_at)
+   SELECT 1, coupon_id, customer_id, order_id, used_at FROM coupon_usages',
+  'SELECT 1'
+);
+PREPARE stmt_coupon_migrate FROM @sql_coupon_migrate;
+EXECUTE stmt_coupon_migrate;
+DEALLOCATE PREPARE stmt_coupon_migrate;
 
 -- ------------------------------------------------------------
 -- Composite unique keys (store-scoped slugs/codes)

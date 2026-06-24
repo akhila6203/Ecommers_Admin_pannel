@@ -45,3 +45,6 @@ export const deleteVariant = (productId, variantId) =>
 export const getProductSeo = (productId) => api.get(`/products/${productId}/seo`);
 
 export const updateProductSeo = (productId, data) => api.put(`/products/${productId}/seo`, data);
+
+export const deleteProductImage = (productId, imageId) =>
+  api.delete(`/products/${productId}/images/${imageId}`);

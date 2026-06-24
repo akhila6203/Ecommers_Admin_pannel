@@ -1,7 +1,7 @@
 import express from "express";
 import { authenticate } from "../middleware/authMiddleware.js";
 import { authorize } from "../middleware/roleMiddleware.js";
-import { upload, uploadErrorHandler } from "../middleware/uploadMiddleware.js";
+import { upload, productUpload, uploadErrorHandler } from "../middleware/uploadMiddleware.js";
 import { auditLog } from "../middleware/auditMiddleware.js";
 import { validateProduct, validateVariantOption, validateProductSeo } from "../validators/productValidator.js";
 import {
@@ -33,6 +33,13 @@ import {
 
 const router = express.Router();
 
+const productFileFields = [
+  { name: "thumbnail", maxCount: 1 },
+  { name: "gallery_images", maxCount: 20 },
+  { name: "variant_images", maxCount: 50 },
+  { name: "images", maxCount: 20 },
+];
+
 // Public routes
 router.get("/export/excel", exportProductsExcel);
 router.get("/slug/:slug", getProductBySlug);
@@ -40,8 +47,8 @@ router.get("/slug/:slug", getProductBySlug);
 // CRUD
 router.get("/", getProducts);
 router.get("/:id", getProduct);
-router.post("/", authenticate, authorize("super_admin", "admin", "manager"), upload.array("images", 20), uploadErrorHandler, validateProduct, auditLog("create", "product"), createProduct);
-router.put("/:id", authenticate, authorize("super_admin", "admin", "manager"), upload.array("images", 20), uploadErrorHandler, validateProduct, auditLog("update", "product"), updateProduct);
+router.post("/", authenticate, authorize("super_admin", "admin", "manager"), productUpload.fields(productFileFields), uploadErrorHandler, validateProduct, auditLog("create", "product"), createProduct);
+router.put("/:id", authenticate, authorize("super_admin", "admin", "manager"), productUpload.fields(productFileFields), uploadErrorHandler, validateProduct, auditLog("update", "product"), updateProduct);
 router.delete("/:id", authenticate, authorize("super_admin", "admin"), auditLog("delete", "product"), deleteProduct);
 
 // Bulk operations

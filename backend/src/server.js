@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { testConnection } from "./config/db.js";
+import { runPendingMigrations } from "./config/runMigrations.js";
 import { storeMiddleware } from "./middleware/storeMiddleware.js";
 import logger from "./config/logger.js";
 import { apiLimiter } from "./middleware/rateLimiterMiddleware.js";
@@ -21,6 +22,7 @@ import customerRoutes from "./routes/customerRoutes.js";
 import couponRoutes from "./routes/couponRoutes.js";
 import offerRoutes from "./routes/offerRoutes.js";
 import bannerRoutes from "./routes/bannerRoutes.js";
+import bannerVideoRoutes from "./routes/bannerVideoRoutes.js";
 import collectionRoutes from "./routes/collectionRoutes.js";
 import settingRoutes from "./routes/settingRoutes.js";
 import contentRoutes from "./routes/contentRoutes.js";
@@ -106,6 +108,7 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/coupons", couponRoutes);
 app.use("/api/offers", offerRoutes);
 app.use("/api/banners", bannerRoutes);
+app.use("/api/banner-videos", bannerVideoRoutes);
 app.use("/api/collections", collectionRoutes);
 app.use("/api/settings", settingRoutes);
 app.use("/api/content", contentRoutes);
@@ -168,6 +171,15 @@ async function startServer() {
   }
 
   console.log("MySQL database connected successfully");
+
+  try {
+    await runPendingMigrations();
+    console.log("Database migrations checked");
+  } catch (migrationError) {
+    console.error("ERROR: Database migration failed:", migrationError.message);
+    logger.error("Server startup failed — migration error", migrationError);
+    process.exit(1);
+  }
 
   app.listen(PORT, () => {
     const startupMsg = `Server running on port ${PORT}`;

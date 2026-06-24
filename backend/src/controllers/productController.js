@@ -100,16 +100,320 @@ const parseCollectionIds = (value) => {
 };
 
 const variantOptionsFromRow = (opts) => {
-  if (!opts?.length) return [];
-  return opts.map((o) => ({ name: o.name, value: o.value }));
+  let options = opts;
+  if (typeof options === "string") {
+    try {
+      options = JSON.parse(options);
+    } catch {
+      options = [];
+    }
+  }
+  if (!Array.isArray(options) || !options.length) return [];
+  return options.map((o) => ({ name: o.name, value: o.value }));
 };
 
 const resolveVariantDimensions = (opts) => {
   const options = variantOptionsFromRow(opts);
   const size = options.find((o) => o.name?.toLowerCase() === "size")?.value || options[0]?.value || null;
   const color = options.find((o) => o.name?.toLowerCase() === "color")?.value || options[1]?.value || null;
+  const fabric = options.find((o) => o.name?.toLowerCase() === "fabric")?.value || null;
   const optionValues = options.length ? JSON.stringify(options) : null;
-  return { size, color, optionValues };
+  return { size, color, fabric, optionValues };
+};
+
+const variantComboKey = (opts) => {
+  let options = opts;
+  if (typeof options === "string") {
+    try {
+      options = JSON.parse(options);
+    } catch {
+      options = [];
+    }
+  }
+  if (!Array.isArray(options)) return "";
+  return options
+    .map((o) => `${o.name}:${o.value}`)
+    .sort()
+    .join("|");
+};
+
+const getVariantColorKey = (opts, fallbackColor = null) => {
+  const options = variantOptionsFromRow(opts);
+  return options.find((o) => o.name?.toLowerCase() === "color")?.value || fallbackColor || null;
+};
+
+const attachColorVariantSummaries = async (products) => {
+  const productIds = products.map((p) => p.id).filter(Boolean);
+  if (!productIds.length) return;
+
+  const placeholders = productIds.map(() => "?").join(",");
+  const rows = await query(
+    `SELECT pvi.product_id, pvi.image, pvi.sort_order, pv.option_values, pv.color
+     FROM product_variant_images pvi
+     INNER JOIN product_variants pv ON pv.id = pvi.variant_id
+     WHERE pvi.product_id IN (${placeholders})
+     ORDER BY pvi.product_id ASC, pvi.sort_order ASC, pvi.id ASC`,
+    productIds
+  );
+
+  const colorMapByProduct = {};
+  for (const row of rows) {
+    const color = getVariantColorKey(row.option_values, row.color);
+    if (!color) continue;
+    if (!colorMapByProduct[row.product_id]) colorMapByProduct[row.product_id] = {};
+    if (!colorMapByProduct[row.product_id][color]) {
+      colorMapByProduct[row.product_id][color] = [];
+    }
+    const images = colorMapByProduct[row.product_id][color];
+    if (!images.some((img) => img.image === row.image)) {
+      images.push({ image: row.image, sort_order: row.sort_order || 0 });
+    }
+  }
+
+  for (const product of products) {
+    const colorMap = colorMapByProduct[product.id] || {};
+    product.color_variants = Object.entries(colorMap).map(([color, images]) => ({
+      color,
+      image: images[0]?.image || null,
+      image_count: images.length,
+    }));
+  }
+};
+
+const parseIdList = (value) => {
+  if (value == null || value === "") return [];
+  const raw = typeof value === "string" ? parseJsonField(value) ?? value : value;
+  const arr = Array.isArray(raw) ? raw : String(raw).split(",");
+  return arr.map((id) => parseInt(id, 10)).filter((id) => !Number.isNaN(id) && id > 0);
+};
+
+const normalizeUploadedFiles = (files) => {
+  if (!files) return [];
+  return Array.isArray(files) ? files : [files];
+};
+
+const groupUploadedProductFiles = (req) => {
+  const grouped = {
+    thumbnail: [],
+    gallery_images: [],
+    variant_images: [],
+    images: [],
+  };
+
+  if (!req.files) return grouped;
+
+  // multer.fields() returns { fieldName: File[] }
+  if (typeof req.files === "object" && !Array.isArray(req.files)) {
+    for (const [field, files] of Object.entries(req.files)) {
+      const list = normalizeUploadedFiles(files);
+      if (grouped[field]) grouped[field].push(...list);
+      else grouped.images.push(...list);
+    }
+    return grouped;
+  }
+
+  const fileList = normalizeUploadedFiles(req.files);
+  for (const file of fileList) {
+    const field = file.fieldname || "images";
+    if (grouped[field]) grouped[field].push(file);
+    else grouped.images.push(file);
+  }
+
+  return grouped;
+};
+
+const hasUploadedProductFiles = (req) => {
+  const grouped = groupUploadedProductFiles(req);
+  return Object.values(grouped).some((files) => files.length > 0);
+};
+
+const attachVariantImages = async (variants, productId) => {
+  if (!variants?.length) return variants;
+  const variantIds = variants.map((v) => v.id);
+  const placeholders = variantIds.map(() => "?").join(",");
+  const images = await query(
+    `SELECT id, variant_id, image, sort_order FROM product_variant_images
+     WHERE product_id = ? AND variant_id IN (${placeholders})
+     ORDER BY sort_order ASC, id ASC`,
+    [productId, ...variantIds]
+  );
+
+  const imagesByVariant = {};
+  for (const img of images) {
+    if (!imagesByVariant[img.variant_id]) imagesByVariant[img.variant_id] = [];
+    imagesByVariant[img.variant_id].push(img);
+  }
+
+  const colorImageCache = {};
+  return variants.map((variant) => {
+    let variantImages = imagesByVariant[variant.id] || [];
+    if (!variantImages.length) {
+      const colorKey = getVariantColorKey(variant.option_values, variant.color);
+      if (colorKey && colorImageCache[colorKey]) {
+        variantImages = colorImageCache[colorKey];
+      }
+    } else {
+      const colorKey = getVariantColorKey(variant.option_values, variant.color);
+      if (colorKey && !colorImageCache[colorKey]) {
+        colorImageCache[colorKey] = variantImages;
+      }
+    }
+    return {
+      ...variant,
+      images: variantImages,
+      image: variantImages[0]?.image || variant.image || null,
+    };
+  });
+};
+
+const loadVariantImagesByComboKey = async (conn, productId) => {
+  const [rows] = await conn.execute(
+    `SELECT pv.id, pv.option_values, pv.color, pvi.image, pvi.sort_order
+     FROM product_variants pv
+     LEFT JOIN product_variant_images pvi ON pvi.variant_id = pv.id
+     WHERE pv.product_id = ?
+     ORDER BY pv.id ASC, pvi.sort_order ASC, pvi.id ASC`,
+    [productId]
+  );
+
+  const imagesByKey = {};
+  for (const row of rows) {
+    const key = variantComboKey(row.option_values);
+    if (!key || !row.image) continue;
+    if (!imagesByKey[key]) imagesByKey[key] = [];
+    const exists = imagesByKey[key].some((img) => img.image === row.image);
+    if (!exists) imagesByKey[key].push({ image: row.image, sort_order: row.sort_order || 0 });
+  }
+  return imagesByKey;
+};
+
+const insertVariantImages = async (conn, storeId, productId, variantId, images) => {
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    await conn.execute(
+      "INSERT INTO product_variant_images (store_id, product_id, variant_id, image, sort_order) VALUES (?, ?, ?, ?, ?)",
+      [storeId, productId, variantId, img.image, img.sort_order ?? i]
+    );
+  }
+  if (images.length) {
+    await conn.execute("UPDATE product_variants SET image = ? WHERE id = ?", [images[0].image, variantId]);
+  }
+};
+
+const saveProductImagesFromUpload = async (conn, storeId, productId, groupedFiles, removedImageIds = []) => {
+  if (removedImageIds.length) {
+    const placeholders = removedImageIds.map(() => "?").join(",");
+    await conn.execute(
+      `DELETE FROM product_images WHERE product_id = ? AND id IN (${placeholders})`,
+      [productId, ...removedImageIds]
+    );
+  }
+
+  const legacyImages = groupedFiles.images || [];
+  let thumbnailFiles = groupedFiles.thumbnail?.length
+    ? groupedFiles.thumbnail
+    : legacyImages.length
+      ? [legacyImages[0]]
+      : [];
+  const galleryFiles = groupedFiles.gallery_images?.length
+    ? groupedFiles.gallery_images
+    : legacyImages.length > 1
+      ? legacyImages.slice(1)
+      : [];
+
+  if (!thumbnailFiles.length && galleryFiles.length) {
+    thumbnailFiles = [galleryFiles[0]];
+  }
+
+  if (thumbnailFiles.length) {
+    const thumbPath = `uploads/products/${thumbnailFiles[0].filename}`;
+    const [thumbRows] = await conn.execute(
+      "SELECT id FROM product_images WHERE product_id = ? AND image_type = 'thumbnail' LIMIT 1",
+      [productId]
+    );
+    if (thumbRows.length) {
+      await conn.execute("UPDATE product_images SET image = ? WHERE id = ?", [thumbPath, thumbRows[0].id]);
+    } else {
+      await conn.execute(
+        "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'thumbnail', 0)",
+        [storeId, productId, thumbPath]
+      );
+    }
+    await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [thumbPath, productId]);
+  }
+
+  if (galleryFiles.length) {
+    const [galleryCountRows] = await conn.execute(
+      "SELECT COUNT(*) as total FROM product_images WHERE product_id = ? AND image_type = 'gallery'",
+      [productId]
+    );
+    let gallerySort = galleryCountRows[0]?.total || 0;
+    for (const file of galleryFiles) {
+      const imagePath = `uploads/products/${file.filename}`;
+      await conn.execute(
+        "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'gallery', ?)",
+        [storeId, productId, imagePath, gallerySort]
+      );
+      gallerySort += 1;
+    }
+  }
+};
+
+const applyVariantImageUploads = async (
+  conn,
+  storeId,
+  productId,
+  savedVariants,
+  variantImageMeta,
+  variantImageFiles
+) => {
+  const meta = parseJsonField(variantImageMeta) || variantImageMeta || {};
+  const files = variantImageFiles || [];
+  const colorGroups = {};
+
+  for (const variant of savedVariants) {
+    const colorKey = getVariantColorKey(variant.options || variant.option_values, variant.color);
+    if (!colorKey) continue;
+    if (!colorGroups[colorKey]) colorGroups[colorKey] = [];
+    colorGroups[colorKey].push(variant);
+  }
+
+  for (const [colorKey, variantsForColor] of Object.entries(colorGroups)) {
+    const colorMeta = meta[colorKey] || {};
+    const newIndexes = Array.isArray(colorMeta.new_file_indexes)
+      ? colorMeta.new_file_indexes
+      : [];
+
+    const newImages = newIndexes
+      .map((idx) => files[idx])
+      .filter(Boolean)
+      .map((file, i) => ({
+        image: `uploads/products/${file.filename}`,
+        sort_order: i,
+      }));
+
+    if (!newImages.length) continue;
+
+    for (const variant of variantsForColor) {
+      const [existingRows] = await conn.execute(
+        "SELECT image, sort_order FROM product_variant_images WHERE variant_id = ? ORDER BY sort_order ASC",
+        [variant.id]
+      );
+      const mergedImages = [
+        ...existingRows,
+        ...newImages.map((img, i) => ({ ...img, sort_order: existingRows.length + i })),
+      ];
+      await conn.execute("DELETE FROM product_variant_images WHERE variant_id = ?", [variant.id]);
+      await insertVariantImages(conn, storeId, productId, variant.id, mergedImages);
+    }
+  }
+};
+
+const syncAllVariantPrices = async (conn, productId, price, offerPrice) => {
+  await conn.execute(
+    "UPDATE product_variants SET price = ?, offer_price = ? WHERE product_id = ? AND status = 'active'",
+    [parsePriceValue(price), parsePriceValue(offerPrice), productId]
+  );
 };
 
 const toNullableId = (value) => {
@@ -147,9 +451,25 @@ const cartesianCombinations = (options) => {
   );
 };
 
-async function saveVariantOptionsAndVariants(conn, productId, variantOptions, variants, price, offerPrice, productStock = 0) {
+async function saveVariantOptionsAndVariants(conn, productId, storeId, variantOptions, variants, price, offerPrice, productStock = 0, variantImageMeta = null, variantImageFiles = []) {
   const options = parseJsonField(variantOptions) || variantOptions;
   if (!options?.length) return null;
+
+  if (variantImageMeta) {
+    const meta = parseJsonField(variantImageMeta) || variantImageMeta || {};
+    for (const colorMeta of Object.values(meta)) {
+      const removedIds = parseIdList(colorMeta.removed_image_ids);
+      if (removedIds.length) {
+        const placeholders = removedIds.map(() => "?").join(",");
+        await conn.execute(
+          `DELETE FROM product_variant_images WHERE product_id = ? AND id IN (${placeholders})`,
+          [productId, ...removedIds]
+        );
+      }
+    }
+  }
+
+  const imagesByComboKey = await loadVariantImagesByComboKey(conn, productId);
 
   await conn.execute("DELETE FROM product_variant_options WHERE product_id = ?", [productId]);
   await conn.execute("DELETE FROM product_variants WHERE product_id = ?", [productId]);
@@ -160,8 +480,8 @@ async function saveVariantOptionsAndVariants(conn, productId, variantOptions, va
       ? opt.option_values
       : parseJsonField(opt.option_values) || [];
     await conn.execute(
-      "INSERT INTO product_variant_options (product_id, option_name, option_values, sort_order) VALUES (?, ?, ?, ?)",
-      [productId, opt.option_name, JSON.stringify(values), opt.sort_order ?? i]
+      "INSERT INTO product_variant_options (store_id, product_id, option_name, option_values, sort_order) VALUES (?, ?, ?, ?, ?)",
+      [storeId, productId, opt.option_name, JSON.stringify(values), opt.sort_order ?? i]
     );
   }
 
@@ -182,34 +502,58 @@ async function saveVariantOptionsAndVariants(conn, productId, variantOptions, va
   for (let i = 0; i < variantRows.length; i++) {
     const v = variantRows[i];
     const opts = v.options || [];
-    const { size, color, optionValues } = resolveVariantDimensions(opts.length ? opts : [
-      v.size ? { name: "Size", value: v.size } : null,
-      v.color ? { name: "Color", value: v.color } : null,
-    ].filter(Boolean));
+    const { size, color, fabric, optionValues } = resolveVariantDimensions(
+      opts.length
+        ? opts
+        : [
+            v.size ? { name: "Size", value: v.size } : null,
+            v.color ? { name: "Color", value: v.color } : null,
+            v.fabric ? { name: "Fabric", value: v.fabric } : null,
+          ].filter(Boolean)
+    );
     const variantSku = String(v.sku || "").trim() || `VAR-${productId}-${String(i).padStart(3, "0")}`;
     const variantStock = parseStockValue(v.stock);
     const variantPrice = parsePriceValue(v.price ?? price, parsePriceValue(price));
     const variantOffer = parsePriceValue(v.offer_price ?? offerPrice, parsePriceValue(offerPrice));
-    await conn.execute(
-      "INSERT INTO product_variants (product_id, sku, size, color, option_values, price, offer_price, stock, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+    const [insertResult] = await conn.execute(
+      "INSERT INTO product_variants (store_id, product_id, sku, size, color, fabric, option_values, price, offer_price, stock, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')",
       [
+        storeId,
         productId,
         variantSku,
         size,
         color,
+        fabric,
         optionValues,
         variantPrice,
         variantOffer,
         variantStock,
       ]
     );
+
+    const variantId = insertResult.insertId;
+    const comboKey = variantComboKey(opts.length ? opts : optionValues);
+    const preservedImages = imagesByComboKey[comboKey] || [];
+    if (preservedImages.length) {
+      await insertVariantImages(conn, storeId, productId, variantId, preservedImages);
+    }
+
     savedVariants.push({
+      id: variantId,
       sku: variantSku,
       price: variantPrice,
       offer_price: variantOffer,
       stock: variantStock,
       option_values: optionValues,
+      options: opts,
+      color,
+      size,
+      fabric,
     });
+  }
+
+  if (variantImageMeta) {
+    await applyVariantImageUploads(conn, storeId, productId, savedVariants, variantImageMeta, variantImageFiles);
   }
 
   return savedVariants;
@@ -366,12 +710,22 @@ export const getProducts = async (req, res) => {
       product.thumbnail = thumbImg?.image || product.thumbnail || null;
 
       const productVariants = variantsByProduct[product.id] || [];
+      product.variant_count = productVariants.length;
       product.fabric = collectProductFabrics(productVariants);
       if (productVariants.length) {
         product.stock = deriveProductStockFromVariants(productVariants);
         const prices = deriveProductPricesFromVariants(productVariants, product.price, product.offer_price);
         product.price = prices.price;
         product.offer_price = prices.offer_price;
+      }
+    }
+
+    try {
+      await attachColorVariantSummaries(products);
+    } catch (summaryError) {
+      logger.error("attachColorVariantSummaries error:", summaryError);
+      for (const product of products) {
+        product.color_variants = product.color_variants || [];
       }
     }
 
@@ -407,6 +761,7 @@ export const getProduct = async (req, res) => {
     const product = products[0];
     product.images = await query("SELECT id, image, image_type, sort_order, alt_text FROM product_images WHERE product_id = ? ORDER BY sort_order ASC", [product.id]);
     product.variants = await query("SELECT * FROM product_variants WHERE product_id = ? AND status = 'active'", [product.id]);
+    product.variants = await attachVariantImages(product.variants, product.id);
     product.fabric = collectProductFabrics(product.variants);
     if (product.variants.length) {
       product.stock = deriveProductStockFromVariants(product.variants);
@@ -536,6 +891,7 @@ export const createProduct = async (req, res) => {
       is_featured, is_trending, is_best_seller, is_new_arrival, status,
       meta_title, meta_description, meta_keywords,
       variant_options, variants, seo_data, collection_ids,
+      removed_image_ids, variant_image_meta, sync_variant_prices,
     } = req.body;
 
     const slug = slugInput?.trim()
@@ -572,16 +928,9 @@ export const createProduct = async (req, res) => {
       [storeId, productId, stockQty, stockQty, low_stock_threshold]
     );
 
-    if (req.files && req.files.length > 0) {
-      const thumbPath = `uploads/products/${req.files[0].filename}`;
-      for (let index = 0; index < req.files.length; index++) {
-        const file = req.files[index];
-        await conn.execute(
-          "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, ?, ?)",
-          [storeId, productId, `uploads/products/${file.filename}`, index === 0 ? "thumbnail" : "gallery", index]
-        );
-      }
-      await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [thumbPath, productId]);
+    const groupedFiles = groupUploadedProductFiles(req);
+    if (hasUploadedProductFiles(req)) {
+      await saveProductImagesFromUpload(conn, storeId, productId, groupedFiles, []);
     } else if (req.body.thumbnail) {
       await conn.execute(
         "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'thumbnail', 0)",
@@ -594,11 +943,14 @@ export const createProduct = async (req, res) => {
       const savedVariants = await saveVariantOptionsAndVariants(
         conn,
         productId,
+        storeId,
         variant_options,
         variants,
         price,
         offer_price,
-        stockQty
+        stockQty,
+        variant_image_meta,
+        groupedFiles.variant_images
       );
       await applyVariantSyncToProduct(conn, productId, savedVariants, price, offer_price, low_stock_threshold);
     }
@@ -642,6 +994,7 @@ export const updateProduct = async (req, res) => {
       is_featured, is_trending, is_best_seller, is_new_arrival, status,
       meta_title, meta_description, meta_keywords,
       variant_options, variants, seo_data, collection_ids,
+      removed_image_ids, variant_image_meta, sync_variant_prices,
     } = req.body;
 
     let slug = existing[0].slug;
@@ -705,42 +1058,18 @@ export const updateProduct = async (req, res) => {
       ]
     );
 
-    if (req.files && req.files.length > 0) {
-      const [thumbRows] = await conn.execute(
-        "SELECT id FROM product_images WHERE product_id = ? AND image_type = 'thumbnail' LIMIT 1",
-        [productId]
-      );
-      const [galleryCountRows] = await conn.execute(
-        "SELECT COUNT(*) as total FROM product_images WHERE product_id = ? AND image_type = 'gallery'",
-        [productId]
-      );
-      const existingThumbId = thumbRows[0]?.id || null;
-      let gallerySort = galleryCountRows[0]?.total || 0;
-      let thumbPath = null;
-
-      for (let i = 0; i < req.files.length; i++) {
-        const imagePath = `uploads/products/${req.files[i].filename}`;
-        if (i === 0) {
-          thumbPath = imagePath;
-          if (existingThumbId) {
-            await conn.execute("UPDATE product_images SET image = ? WHERE id = ?", [imagePath, existingThumbId]);
-          } else {
-            await conn.execute(
-              "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'thumbnail', 0)",
-              [storeId, productId, imagePath]
-            );
-          }
-        } else {
-          await conn.execute(
-            "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'gallery', ?)",
-            [storeId, productId, imagePath, gallerySort]
-          );
-          gallerySort += 1;
-        }
-      }
-
-      if (thumbPath) {
-        await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [thumbPath, productId]);
+    const groupedFiles = groupUploadedProductFiles(req);
+    if (hasUploadedProductFiles(req)) {
+      const removedIds = parseIdList(removed_image_ids);
+      await saveProductImagesFromUpload(conn, storeId, productId, groupedFiles, removedIds);
+    } else if (removed_image_ids) {
+      const removedIds = parseIdList(removed_image_ids);
+      if (removedIds.length) {
+        const placeholders = removedIds.map(() => "?").join(",");
+        await conn.execute(
+          `DELETE FROM product_images WHERE product_id = ? AND id IN (${placeholders})`,
+          [productId, ...removedIds]
+        );
       }
     }
 
@@ -748,11 +1077,14 @@ export const updateProduct = async (req, res) => {
       const savedVariants = await saveVariantOptionsAndVariants(
         conn,
         productId,
+        storeId,
         variant_options,
         variants,
         finalPrice,
         finalOfferPrice,
-        finalStock
+        finalStock,
+        variant_image_meta,
+        groupedFiles.variant_images
       );
       await applyVariantSyncToProduct(
         conn,
@@ -764,6 +1096,10 @@ export const updateProduct = async (req, res) => {
       );
     } else if (stock !== undefined) {
       await syncProductInventory(conn, productId, finalStock, low_stock_threshold);
+    }
+
+    if (sync_variant_prices === "1" || sync_variant_prices === true) {
+      await syncAllVariantPrices(conn, productId, finalPrice, finalOfferPrice);
     }
 
     if (seo_data) {

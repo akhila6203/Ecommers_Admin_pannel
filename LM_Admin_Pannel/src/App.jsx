@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes, useParams } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -33,6 +33,16 @@ const queryClient = new QueryClient({
   },
 });
 
+function EditProductPage() {
+  const { id } = useParams();
+  return <AddProduct key={`edit-${id}`} />;
+}
+
+function SeoProductPage() {
+  const { id } = useParams();
+  return <AddProduct key={`seo-${id}`} />;
+}
+
 const App = () => {
   return (
     <QueryClientProvider client={queryClient}>
@@ -46,9 +56,9 @@ const App = () => {
                 <Route path="/login" element={<Login />} />
                 <Route element={<AppLayout />}>
                   <Route path="/" element={<Dashboard />} />
-                  <Route path="/products/add" element={<AddProduct />} />
-                  <Route path="/products/edit/:id" element={<AddProduct />} />
-                  <Route path="/products/:id/seo" element={<AddProduct />} />
+                  <Route path="/products/add" element={<AddProduct key="add" />} />
+                  <Route path="/products/edit/:id" element={<EditProductPage />} />
+                  <Route path="/products/:id/seo" element={<SeoProductPage />} />
                   <Route path="/products/list" element={<ProductList />} />
                   <Route path="/categories/:type" element={<Categories />} />
                   <Route path="/collections" element={<Collections />} />

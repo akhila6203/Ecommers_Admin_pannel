@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { toast } from "sonner";
-import {
-  Loader2, Save, Plus, Trash2, X, GripVertical,
+import { Loader2, Save, Plus, Trash2, X, GripVertical, AlertCircle,
   Image as ImageIcon, Upload, Check,
 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -65,6 +64,54 @@ const parseStoredOptionValues = (opt) => {
 };
 
 const comboKey = (options) => options.map((o) => `${o.name}:${o.value}`).join("|");
+
+const getOptionValue = (combo, name) =>
+  combo.find((o) => o.name?.toLowerCase() === name.toLowerCase())?.value || null;
+
+const getVariantColor = (variant) => {
+  if (variant.options?.length) {
+    return getOptionValue(variant.options, "color") || variant.color || null;
+  }
+  return variant.color || null;
+};
+
+const getUniqueColors = (variantRows) => {
+  const colors = new Set();
+  for (const v of variantRows || []) {
+    const color = getVariantColor(v);
+    if (color) colors.add(color);
+  }
+  return [...colors];
+};
+
+const getColorImagePreviews = (color, variantColorImages = {}) => {
+  if (!color) return [];
+  const colorState = variantColorImages[color] || {};
+  return [
+    ...(colorState.existing || []).map((img) => ({ id: img.id, url: img.url, type: "existing" })),
+    ...(colorState.previews || []).map((url, i) => ({ id: `new-${i}`, url, type: "new", previewIndex: i })),
+  ];
+};
+
+const buildColorImageMapFromVariants = (variantRows) => {
+  const colorImageMap = {};
+  for (const variant of variantRows || []) {
+    const color = getVariantColor(variant);
+    if (!color || !variant.images?.length) continue;
+    if (!colorImageMap[color]) {
+      colorImageMap[color] = {
+        existing: variant.images.map((img) => ({
+          id: img.id,
+          url: resolveUploadUrl(img.image, "products"),
+        })),
+        newFiles: [],
+        removedIds: [],
+        previews: [],
+      };
+    }
+  }
+  return colorImageMap;
+};
 
 const parseStockValue = (val) => {
   const n = Number.parseInt(String(val ?? "0").trim(), 10);
@@ -148,8 +195,10 @@ const buildCombinations = (variantOptions, existingVariants, defaults) => {
       price: existing?.price ?? defaults.price,
       offer_price: existing?.offer_price ?? defaults.offer_price,
       stock: existing?.stock ?? parseStockValue(defaults.stock),
-      size: combo[0]?.value || null,
-      color: combo[1]?.value || null,
+      size: getOptionValue(combo, "size") || combo[0]?.value || null,
+      color: getOptionValue(combo, "color") || combo[1]?.value || null,
+      fabric: getOptionValue(combo, "fabric") || null,
+      images: existing?.images || [],
     };
   });
 };
@@ -178,11 +227,34 @@ const mapDbVariantsToLocal = (dbVariants, variantOptions) =>
       stock: parseStockValue(v.stock),
       price: v.price ?? "",
       offer_price: v.offer_price ?? "",
+      fabric: v.fabric || getOptionValue(options, "fabric") || "",
+      images: v.images || [],
       _key: comboKey(options),
       label: options.map((o) => o.value).join(" / ") || v.sku || "Variant",
       options,
     };
   });
+
+const buildFormFromProduct = (product) => ({
+  name: product.name || "",
+  slug: product.slug || "",
+  category_id: String(product.category_id || ""),
+  sub_category_id: String(product.sub_category_id || ""),
+  child_category_id: String(product.child_category_id || ""),
+  brand: product.brand || "",
+  vendor: product.vendor || "",
+  stock: String(product.stock ?? ""),
+  price: String(product.offer_price || product.price || ""),
+  compare_at_price: String(product.price || ""),
+  cost_price: String(product.cost_price || ""),
+  charge_tax: Number(product.gst_percent || 0) > 0,
+  gst_percent: String(product.gst_percent || ""),
+  short_description: product.short_description || "",
+  long_description: product.long_description || "",
+  product_type: product.product_type || "",
+  tags: product.tags || "",
+  status: product.status || "active",
+});
 
 const quillModules = {
   toolbar: [
@@ -210,15 +282,25 @@ export default function AddProduct() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
-  const isEditing = Boolean(id);
+
+  const isAddMode = location.pathname === "/products/add";
+  const isEditRoute = location.pathname.includes("/products/edit/");
   const isSeoRoute = location.pathname.endsWith("/seo");
+  const productId = isAddMode ? null : id;
+  const isEditing = isEditRoute && Boolean(productId);
+  const needsProductLoad = Boolean(productId);
+  const listProduct = location.state?.product;
+
   const [activeTab, setActiveTab] = useState(isSeoRoute ? "seo" : "info");
   const [form, setForm] = useState(emptyForm);
   const [seo, setSeo] = useState(emptySeo);
   const [thumbnail, setThumbnail] = useState(null);
-  const [galleryFiles, setGalleryFiles] = useState(null);
+  const [galleryFiles, setGalleryFiles] = useState([]);
   const [thumbnailPreview, setThumbnailPreview] = useState(null);
   const [galleryPreview, setGalleryPreview] = useState([]);
+  const [existingGalleryImages, setExistingGalleryImages] = useState([]);
+  const [removedImageIds, setRemovedImageIds] = useState([]);
+  const [variantColorImages, setVariantColorImages] = useState({});
 
   // Variant options state
   const [variantOptions, setVariantOptions] = useState([]);
@@ -230,15 +312,46 @@ export default function AddProduct() {
   const [editingVariantKey, setEditingVariantKey] = useState(null);
   const [editVariantData, setEditVariantData] = useState({});
   const variantsInitialized = useRef(false);
+  const hydratedProductId = useRef(null);
 
   // Collections state
   const [selectedCollectionIds, setSelectedCollectionIds] = useState([]);
 
+  // Reset local edit state when switching between products
+  useEffect(() => {
+    if (!productId) {
+      hydratedProductId.current = null;
+      variantsInitialized.current = false;
+      return;
+    }
+    if (hydratedProductId.current !== String(productId)) {
+      variantsInitialized.current = false;
+      setVariantOptions([]);
+      setVariants([]);
+      setEditingVariantKey(null);
+      setEditVariantData({});
+      setExistingGalleryImages([]);
+      setRemovedImageIds([]);
+      setThumbnail(null);
+      setGalleryFiles([]);
+      setGalleryPreview([]);
+      setVariantColorImages({});
+      setSelectedCollectionIds([]);
+    }
+  }, [productId]);
+
   // ─── Load existing product (edit mode) ───
-  const { data: productResponse, isLoading: productLoading } = useQuery({
-    queryKey: ["product", id],
-    queryFn: () => getProduct(id),
-    enabled: isEditing,
+  const {
+    data: productResponse,
+    isLoading: productLoading,
+    isFetching: productFetching,
+    isError: productError,
+    error: productFetchError,
+    refetch: refetchProduct,
+  } = useQuery({
+    queryKey: ["product", productId],
+    queryFn: () => getProduct(productId),
+    enabled: needsProductLoad,
   });
   const productData = productResponse?.data;
 
@@ -258,66 +371,76 @@ export default function AddProduct() {
 
   // Load variant options when editing
   const { data: optionsResponse = {}, isFetched: optionsFetched } = useQuery({
-    queryKey: ["variantOptions", id],
-    queryFn: () => getVariantOptions(id),
-    enabled: isEditing,
+    queryKey: ["variantOptions", productId],
+    queryFn: () => getVariantOptions(productId),
+    enabled: needsProductLoad,
   });
   const existingOptions = optionsResponse?.data || [];
 
   // Load SEO when editing
   const { data: seoResponse } = useQuery({
-    queryKey: ["productSeo", id],
-    queryFn: () => getProductSeo(id),
-    enabled: isEditing,
+    queryKey: ["productSeo", productId],
+    queryFn: () => getProductSeo(productId),
+    enabled: needsProductLoad,
   });
   const existingSeo = seoResponse?.data;
 
-  // Populate form when product data loads
+  // Populate form when product data loads (basic fields — list row or full API)
   useEffect(() => {
-    if (productData) {
-      setForm({
-        name: productData.name || "",
-        slug: productData.slug || "",
-        category_id: String(productData.category_id || ""),
-        sub_category_id: String(productData.sub_category_id || ""),
-        child_category_id: String(productData.child_category_id || ""),
-        brand: productData.brand || "",
-        vendor: productData.vendor || "",
-        stock: String(productData.stock ?? ""),
-        price: String(productData.offer_price || productData.price || ""),
-        compare_at_price: String(productData.price || ""),
-        cost_price: String(productData.cost_price || ""),
-        charge_tax: Number(productData.gst_percent || 0) > 0,
-        gst_percent: String(productData.gst_percent || ""),
-        short_description: productData.short_description || "",
-        long_description: productData.long_description || "",
-        product_type: productData.product_type || "",
-        tags: productData.tags || "",
-        status: productData.status || "active",
-      });
+    const source =
+      productData ||
+      (listProduct && String(listProduct.id) === String(productId) ? listProduct : null);
+    if (!source || !productId) return;
+    if (hydratedProductId.current === String(productId) && !productData) return;
 
-      if (productData.collection_ids?.length) {
-        setSelectedCollectionIds(productData.collection_ids);
-      }
+    setForm(buildFormFromProduct(source));
 
-      // Load existing images if no new files are selected
-      if (productData.images && productData.images.length > 0) {
-        const thumbImg = productData.images.find((img) => img.image_type === "thumbnail") || productData.images[0];
-        if (thumbImg) {
-          const thumbSrc = resolveUploadUrl(thumbImg.image, "products");
-          setThumbnailPreview(thumbSrc);
-        }
-        
-        const galleryImgs = productData.images.filter((img) => img.image_type === "gallery");
-        if (galleryImgs.length > 0) {
-          const gallerySrcs = galleryImgs.map((img) => resolveUploadUrl(img.image, "products"));
-          setGalleryPreview(gallerySrcs);
-        }
-      }
+    if (source.collection_ids?.length) {
+      setSelectedCollectionIds(source.collection_ids);
     }
+
+    if (source.images && source.images.length > 0) {
+      const galleryImgs = source.images.filter((img) => img.image_type === "gallery");
+      setExistingGalleryImages(
+        galleryImgs.map((img) => ({
+          id: img.id,
+          url: resolveUploadUrl(img.image, "products"),
+          image_type: "gallery",
+        }))
+      );
+
+      const thumbImg = source.images.find((img) => img.image_type === "thumbnail") || source.images[0];
+      if (thumbImg) {
+        setThumbnailPreview(resolveUploadUrl(thumbImg.image, "products"));
+      }
+    } else if (source.thumbnail) {
+      setThumbnailPreview(resolveUploadUrl(source.thumbnail, "products"));
+    }
+
+    hydratedProductId.current = String(productId);
+  }, [productData, listProduct, productId]);
+
+  // Variant color images — only from full product API (never mixed with gallery)
+  useEffect(() => {
+    if (!productData?.variants?.length) return;
+    setVariantColorImages(buildColorImageMapFromVariants(productData.variants));
   }, [productData]);
 
-  // Populate SEO when loaded
+  // Populate variant options and variants when editing (wait for full product data)
+  useEffect(() => {
+    if (!needsProductLoad || variantsInitialized.current) return;
+    if (productLoading || !optionsFetched || !productData) return;
+
+    if (existingOptions.length) {
+      setVariantOptions(existingOptions);
+      if (productData.variants?.length) {
+        setVariants(mapDbVariantsToLocal(productData.variants, existingOptions));
+      }
+    } else if (productData.variants?.length) {
+      setVariants(mapDbVariantsToLocal(productData.variants, []));
+    }
+    variantsInitialized.current = true;
+  }, [needsProductLoad, productLoading, optionsFetched, existingOptions, productData, productId]);
   useEffect(() => {
     if (existingSeo) {
       setSeo({
@@ -327,21 +450,7 @@ export default function AddProduct() {
     }
   }, [existingSeo]);
 
-  // Populate variant options and variants when editing
-  useEffect(() => {
-    if (!isEditing || variantsInitialized.current) return;
-    if (productLoading || !optionsFetched) return;
-
-    if (existingOptions.length) {
-      setVariantOptions(existingOptions);
-      if (productData?.variants?.length) {
-        setVariants(mapDbVariantsToLocal(productData.variants, existingOptions));
-      }
-    }
-    variantsInitialized.current = true;
-  }, [isEditing, productLoading, optionsFetched, existingOptions, productData]);
-
-  // Auto-generate variant combinations when options change (after initial edit load)
+  // Populate SEO when loaded
   const regenerateVariants = (nextOptions, prevVariants = variants) => {
     const built = buildCombinations(nextOptions, prevVariants, {
       price: form.compare_at_price || form.price || "0",
@@ -444,15 +553,64 @@ export default function AddProduct() {
   };
 
   const handleGalleryChange = (e) => {
-    const files = e.target.files;
-    if (files) {
-      setGalleryFiles(files);
-      const previews = [];
-      for (let i = 0; i < files.length; i++) {
-        previews.push(URL.createObjectURL(files[i]));
-      }
-      setGalleryPreview(previews);
-    }
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    setGalleryFiles((prev) => [...prev, ...files]);
+    setGalleryPreview((prev) => [...prev, ...files.map((file) => URL.createObjectURL(file))]);
+    e.target.value = "";
+  };
+
+  const handleRemoveExistingGalleryImage = (imageId) => {
+    setRemovedImageIds((prev) => [...prev, imageId]);
+    setExistingGalleryImages((prev) => prev.filter((img) => img.id !== imageId));
+  };
+
+  const handleRemoveNewGalleryImage = (index) => {
+    setGalleryFiles((prev) => prev.filter((_, i) => i !== index));
+    setGalleryPreview((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleVariantColorImagesChange = (color, files) => {
+    const fileList = Array.from(files || []);
+    if (!fileList.length) return;
+    setVariantColorImages((prev) => ({
+      ...prev,
+      [color]: {
+        existing: prev[color]?.existing || [],
+        newFiles: [...(prev[color]?.newFiles || []), ...fileList],
+        removedIds: prev[color]?.removedIds || [],
+        previews: [
+          ...(prev[color]?.previews || []),
+          ...fileList.map((f) => URL.createObjectURL(f)),
+        ],
+      },
+    }));
+  };
+
+  const handleRemoveVariantColorImage = (color, imageId) => {
+    setVariantColorImages((prev) => ({
+      ...prev,
+      [color]: {
+        ...prev[color],
+        existing: (prev[color]?.existing || []).filter((img) => img.id !== imageId),
+        removedIds: [...(prev[color]?.removedIds || []), imageId],
+      },
+    }));
+  };
+
+  const handleRemoveVariantColorNewImage = (color, previewIndex) => {
+    setVariantColorImages((prev) => {
+      const colorState = prev[color] || { existing: [], newFiles: [], previews: [], removedIds: [] };
+      const newFiles = [...(colorState.newFiles || [])];
+      const previews = [...(colorState.previews || [])];
+      newFiles.splice(previewIndex, 1);
+      previews.splice(previewIndex, 1);
+      return {
+        ...prev,
+        [color]: { ...colorState, newFiles, previews },
+      };
+    });
   };
 
   // ─── Mutations ───
@@ -502,12 +660,36 @@ export default function AddProduct() {
 
       payload.append("collection_ids", JSON.stringify(selectedCollectionIds));
 
-      // Files — backend multer only accepts "images"; first file is stored as thumbnail
-      if (thumbnail) payload.append("images", thumbnail);
-      if (galleryFiles) {
-        for (let i = 0; i < galleryFiles.length; i++) {
-          payload.append("images", galleryFiles[i]);
+      // Product images — separate thumbnail and gallery uploads
+      if (thumbnail) payload.append("thumbnail", thumbnail);
+      for (const file of galleryFiles) {
+        payload.append("gallery_images", file);
+      }
+      if (removedImageIds.length) {
+        payload.append("removed_image_ids", JSON.stringify(removedImageIds));
+      }
+
+      // Variant images grouped by color (Flipkart-style)
+      const variantImageMeta = {};
+      const variantImageFiles = [];
+      for (const color of getUniqueColors(variants)) {
+        const colorState = variantColorImages[color] || { existing: [], newFiles: [], removedIds: [] };
+        const newIndexes = [];
+        for (const file of colorState.newFiles || []) {
+          newIndexes.push(variantImageFiles.length);
+          variantImageFiles.push(file);
         }
+        variantImageMeta[color] = {
+          existing_image_ids: (colorState.existing || []).map((img) => img.id),
+          removed_image_ids: colorState.removedIds || [],
+          new_file_indexes: newIndexes,
+        };
+      }
+      if (Object.keys(variantImageMeta).length) {
+        payload.append("variant_image_meta", JSON.stringify(variantImageMeta));
+      }
+      for (const file of variantImageFiles) {
+        payload.append("variant_images", file);
       }
 
       // Variants + SEO (single request)
@@ -533,6 +715,7 @@ export default function AddProduct() {
               options: v.options,
               size: v.size,
               color: v.color,
+              fabric: v.fabric,
             }))
           )
         );
@@ -540,18 +723,18 @@ export default function AddProduct() {
       payload.append("seo_data", JSON.stringify(seo));
 
       if (isEditing) {
-        await updateProduct(id, payload);
+        await updateProduct(productId, payload);
       } else {
         const result = await createProduct(payload);
         return result;
       }
     },
     onSuccess: async () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
-      if (isEditing) {
-        queryClient.invalidateQueries({ queryKey: ["product", id] });
-        queryClient.invalidateQueries({ queryKey: ["variantOptions", id] });
-        queryClient.invalidateQueries({ queryKey: ["productSeo", id] });
+      await queryClient.invalidateQueries({ queryKey: ["products"] });
+      if (isEditing && productId) {
+        await queryClient.invalidateQueries({ queryKey: ["product", productId] });
+        await queryClient.invalidateQueries({ queryKey: ["variantOptions", productId] });
+        await queryClient.invalidateQueries({ queryKey: ["productSeo", productId] });
       }
 
       toast.success(isEditing ? "Product updated successfully!" : "Product added successfully!");
@@ -561,9 +744,12 @@ export default function AddProduct() {
         setVariantOptions([]);
         setVariants([]);
         setThumbnail(null);
-        setGalleryFiles(null);
+        setGalleryFiles([]);
         setThumbnailPreview(null);
         setGalleryPreview([]);
+        setExistingGalleryImages([]);
+        setRemovedImageIds([]);
+        setVariantColorImages({});
         setSelectedCollectionIds([]);
         variantsInitialized.current = false;
       }
@@ -658,6 +844,15 @@ export default function AddProduct() {
   };
 
   const handleRemoveOptionValue = (optionId, valueToRemove) => {
+    const removedOption = variantOptions.find((o) => o.id === optionId);
+    if (removedOption?.option_name?.toLowerCase() === "color") {
+      setVariantColorImages((prev) => {
+        const next = { ...prev };
+        delete next[valueToRemove];
+        return next;
+      });
+    }
+
     setVariantOptions((prev) => {
       const next = prev
         .map((opt) => {
@@ -735,11 +930,29 @@ export default function AddProduct() {
     );
   };
 
+  const hasProductSource =
+    Boolean(productData) ||
+    (listProduct && String(listProduct.id) === String(productId));
+
   // ─── Loading / Error states ───
-  if (isEditing && productLoading) {
+  if (needsProductLoad && !hasProductSource && (productLoading || productFetching)) {
     return (
-      <div className="flex items-center justify-center h-[60vh]">
+      <div className="flex flex-col items-center justify-center h-[60vh] gap-3">
         <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">Loading product details...</p>
+      </div>
+    );
+  }
+
+  if (needsProductLoad && productError && !hasProductSource) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[60vh] gap-3">
+        <AlertCircle className="w-8 h-8 text-destructive" />
+        <p className="text-sm text-destructive">
+          {productFetchError?.response?.data?.message || productFetchError?.message || "Failed to load product."}
+        </p>
+        <Button variant="outline" onClick={() => refetchProduct()}>Retry</Button>
+        <Button variant="ghost" onClick={() => navigate("/products/list")}>Back to Product List</Button>
       </div>
     );
   }
@@ -879,7 +1092,9 @@ export default function AddProduct() {
               <Card>
                 <CardHeader>
                   <CardTitle className="text-lg">Media</CardTitle>
-                  <CardDescription>Thumbnail and gallery images</CardDescription>
+                  <CardDescription>
+                    Product-level thumbnail and gallery images. Color-specific variant images are managed separately in the Variants tab.
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {/* Thumbnail */}
@@ -900,29 +1115,48 @@ export default function AddProduct() {
                       </label>
                     </div>
                   </div>
-                  {/* Gallery */}
+                  {/* Gallery — product-level only, not variant color images */}
                   <div>
-                    <Label className={labelClass}>Product Images (Multiple)</Label>
-                    <div className="mt-1">
-                      <label className="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed border-border rounded-lg cursor-pointer hover:border-primary/50 transition bg-secondary/30">
-                        {galleryPreview.length > 0 ? (
-                          <div className="grid grid-cols-3 gap-1 w-full h-full p-1">
-                            {galleryPreview.slice(0, 6).map((preview, i) => (
-                              <img key={i} src={preview} alt={`Gallery ${i}`} className="w-full h-full object-cover rounded" />
-                            ))}
-                            {galleryPreview.length > 6 && (
-                              <div className="flex items-center justify-center bg-muted rounded text-xs text-muted-foreground">
-                                +{galleryPreview.length - 6}
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                            <ImageIcon className="w-8 h-8" />
-                            <span className="text-sm">Click to upload images</span>
-                            <span className="text-xs">Supports multiple images</span>
-                          </div>
-                        )}
+                    <Label className={labelClass}>Product Gallery Images</Label>
+                    <p className="text-xs text-muted-foreground mb-2">General product photos shown on the product page. Not linked to color variants.</p>
+                    <div className="mt-1 space-y-2">
+                      {(existingGalleryImages.length > 0 || galleryPreview.length > 0) && (
+                        <div className="grid grid-cols-3 gap-2">
+                          {existingGalleryImages.map((img) => (
+                            <div key={`existing-${img.id}`} className="relative aspect-square border border-border rounded overflow-hidden">
+                              <img src={img.url} alt="" className="w-full h-full object-cover" />
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveExistingGalleryImage(img.id)}
+                                className="absolute top-1 right-1 bg-background/90 rounded-full p-0.5"
+                              >
+                                <X className="w-3 h-3 text-destructive" />
+                              </button>
+                              <span className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[10px] px-1">
+                                Gallery
+                              </span>
+                            </div>
+                          ))}
+                          {galleryPreview.map((preview, i) => (
+                            <div key={`new-${i}`} className="relative aspect-square border border-border rounded overflow-hidden">
+                              <img src={preview} alt={`New ${i + 1}`} className="w-full h-full object-cover" />
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveNewGalleryImage(i)}
+                                className="absolute top-1 right-1 bg-background/90 rounded-full p-0.5"
+                              >
+                                <X className="w-3 h-3 text-destructive" />
+                              </button>
+                              <span className="absolute bottom-0 left-0 right-0 bg-primary/70 text-white text-[10px] px-1">New</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-border rounded-lg cursor-pointer hover:border-primary/50 transition bg-secondary/30">
+                        <div className="flex flex-col items-center gap-1 text-muted-foreground">
+                          <ImageIcon className="w-6 h-6" />
+                          <span className="text-sm">Add gallery images</span>
+                        </div>
                         <input type="file" multiple accept="image/*" onChange={handleGalleryChange} className="hidden" />
                       </label>
                     </div>
@@ -962,6 +1196,12 @@ export default function AddProduct() {
 
             {/* ═══════════════ Tab 2: Variants ═══════════════ */}
             <TabsContent value="variants" className="mt-6 space-y-6">
+              {isEditing && (productLoading || productFetching) && !productData && (
+                <div className="flex items-center gap-2 p-3 rounded-lg border border-border bg-secondary/30 text-sm text-muted-foreground">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Loading variant and color image data...
+                </div>
+              )}
               <Card>
                 <CardHeader>
                   <CardTitle className="text-lg">Variants</CardTitle>
@@ -1077,9 +1317,79 @@ export default function AddProduct() {
               {variants.length > 0 && (
                 <Card>
                   <CardHeader>
+                    <CardTitle className="text-lg">Color Images</CardTitle>
+                    <CardDescription>
+                      Upload images per color variant. Each color has its own image set — all sizes of the same color share these images (like Flipkart/Amazon).
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {getUniqueColors(variants).map((color) => {
+                      const allPreviews = getColorImagePreviews(color, variantColorImages);
+                      return (
+                        <div key={color} className="rounded-lg border-2 border-primary/20 bg-primary/5 p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Badge className="text-sm px-3 py-1">{color}</Badge>
+                              <span className="text-xs text-muted-foreground">
+                                {allPreviews.length} image{allPreviews.length !== 1 ? "s" : ""} assigned to <strong>{color}</strong>
+                              </span>
+                            </div>
+                            <label className="inline-flex items-center gap-1 text-xs text-primary cursor-pointer hover:underline font-medium">
+                              <Upload className="w-3.5 h-3.5" />
+                              Add images for {color}
+                              <input
+                                type="file"
+                                multiple
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => handleVariantColorImagesChange(color, e.target.files)}
+                              />
+                            </label>
+                          </div>
+                          {allPreviews.length > 0 ? (
+                            <div className="flex flex-wrap gap-3">
+                              {allPreviews.map((img, index) => (
+                                <div key={`${color}-${img.id}`} className="relative group">
+                                  <div className="w-24 h-24 border-2 border-border rounded-lg overflow-hidden shadow-sm">
+                                    <img src={img.url} alt={`${color} image ${index + 1}`} className="w-full h-full object-cover" />
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      img.type === "existing"
+                                        ? handleRemoveVariantColorImage(color, img.id)
+                                        : handleRemoveVariantColorNewImage(color, img.previewIndex)
+                                    }
+                                    className="absolute -top-1.5 -right-1.5 bg-destructive text-destructive-foreground rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                  <div className="mt-1 text-center">
+                                    <span className="text-[10px] font-medium text-primary block">{color}</span>
+                                    <span className="text-[9px] text-muted-foreground">#{index + 1}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 py-3 px-4 rounded-md border border-dashed border-border bg-background">
+                              <ImageIcon className="w-4 h-4 text-muted-foreground" />
+                              <p className="text-xs text-muted-foreground">No images assigned to <strong>{color}</strong> yet — upload above</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </CardContent>
+                </Card>
+              )}
+
+              {variants.length > 0 && (
+                <Card>
+                  <CardHeader>
                     <CardTitle className="text-lg">Variants ({variants.length})</CardTitle>
                     <CardDescription>
-                      Combinations update in real time. Set SKU, pricing, and stock for each variant before saving.
+                      Set SKU, pricing, and stock for each variant. Color images are shown in the Images column.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="overflow-x-auto">
@@ -1087,20 +1397,38 @@ export default function AddProduct() {
                       <thead>
                         <tr className="border-b border-border">
                           <th className="text-left py-2 px-3 font-medium text-muted-foreground">Variant</th>
+                          <th className="text-left py-2 px-3 font-medium text-muted-foreground">Images</th>
                           <th className="text-left py-2 px-3 font-medium text-muted-foreground">SKU</th>
                           <th className="text-left py-2 px-3 font-medium text-muted-foreground">Price (₹)</th>
-                          <th className="text-left py-2 px-3 font-medium text-muted-foreground">Offer Price (₹)</th>
+                          <th className="text-left py-2 px-3 font-medium text-muted-foreground">Offer (₹)</th>
                           <th className="text-left py-2 px-3 font-medium text-muted-foreground">Stock</th>
                           <th className="text-left py-2 px-3 font-medium text-muted-foreground">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {variants.map((v) => (
+                        {variants.map((v) => {
+                          const variantColor = getVariantColor(v);
+                          const colorImages = getColorImagePreviews(variantColor, variantColorImages);
+                          return (
                           <Fragment key={variantEditKey(v)}>
                             <tr className="border-b border-border/50 hover:bg-secondary/20 transition">
                               {editingVariantKey === variantEditKey(v) ? (
                                 <>
                                   <td className="py-2 px-3 font-medium">{v.label}</td>
+                                  <td className="py-2 px-3">
+                                    {colorImages.length > 0 ? (
+                                      <div className="flex gap-1">
+                                        {colorImages.slice(0, 3).map((img) => (
+                                          <img key={img.id} src={img.url} alt="" className="w-8 h-8 rounded object-cover border border-border" />
+                                        ))}
+                                        {colorImages.length > 3 && (
+                                          <span className="text-xs text-muted-foreground self-center">+{colorImages.length - 3}</span>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <span className="text-xs text-muted-foreground">—</span>
+                                    )}
+                                  </td>
                                   <td className="py-2 px-3">
                                     <Input name="sku" value={editVariantData.sku} onChange={handleVariantFieldChange} className="h-8 text-xs w-28" placeholder="SKU" />
                                   </td>
@@ -1127,6 +1455,37 @@ export default function AddProduct() {
                               ) : (
                                 <>
                                   <td className="py-2 px-3 font-medium">{v.label}</td>
+                                  <td className="py-2 px-3">
+                                    {colorImages.length > 0 ? (
+                                      <div className="space-y-1">
+                                        {variantColor && (
+                                          <Badge variant="outline" className="text-[10px] h-5 px-1.5">{variantColor}</Badge>
+                                        )}
+                                        <div className="flex gap-1">
+                                          {colorImages.slice(0, 4).map((img, idx) => (
+                                            <div key={img.id} className="relative">
+                                              <img
+                                                src={img.url}
+                                                alt={`${variantColor} ${idx + 1}`}
+                                                className="w-9 h-9 rounded object-cover border-2 border-primary/30"
+                                                title={`${variantColor} — image ${idx + 1}`}
+                                              />
+                                              <span className="absolute -bottom-1 -right-1 bg-primary text-primary-foreground text-[8px] rounded-full w-3.5 h-3.5 flex items-center justify-center">
+                                                {idx + 1}
+                                              </span>
+                                            </div>
+                                          ))}
+                                          {colorImages.length > 4 && (
+                                            <span className="text-xs text-muted-foreground self-center">+{colorImages.length - 4}</span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <span className="text-xs text-amber-600 dark:text-amber-400">
+                                        {variantColor ? `No images for ${variantColor}` : "—"}
+                                      </span>
+                                    )}
+                                  </td>
                                   <td className="py-2 px-3 font-mono text-xs">{v.sku || "—"}</td>
                                   <td className="py-2 px-3">₹{v.price || "-"}</td>
                                   <td className="py-2 px-3">₹{v.offer_price || "-"}</td>
@@ -1145,7 +1504,8 @@ export default function AddProduct() {
                               )}
                             </tr>
                           </Fragment>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </CardContent>

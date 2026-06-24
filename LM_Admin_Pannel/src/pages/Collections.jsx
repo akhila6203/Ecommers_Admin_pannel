@@ -17,6 +17,8 @@ import {
 } from "@/services/collectionService";
 import { getProducts } from "@/services/productService";
 
+import { resolveUploadUrl } from "@/utils/imageUrl";
+
 const emptyForm = { name: "", label: "", description: "", status: "active", product_ids: [] };
 
 export default function Collections() {
@@ -26,6 +28,8 @@ export default function Collections() {
   const [viewId, setViewId] = useState(null);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyForm);
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["collections", page],
@@ -41,9 +45,9 @@ export default function Collections() {
     enabled: !!viewId,
   });
 
-  const { data: productsData } = useQuery({
+  const { data: productsData, isLoading: productsLoading } = useQuery({
     queryKey: ["products", "picker"],
-    queryFn: () => getProducts({ page: 1, limit: 200 }),
+    queryFn: () => getProducts({ page: 1, limit: 500 }),
     enabled: modalOpen,
   });
   const allProducts = productsData?.data || [];
@@ -52,13 +56,13 @@ export default function Collections() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const payload = {
-        name: form.name,
-        label: form.label,
-        description: form.description,
-        status: form.status,
-        product_ids: form.product_ids,
-      };
+      const payload = new FormData();
+      payload.append("name", form.name);
+      payload.append("label", form.label || "");
+      payload.append("description", form.description || "");
+      payload.append("status", form.status);
+      payload.append("product_ids", JSON.stringify(form.product_ids));
+      if (imageFile) payload.append("image", imageFile);
       if (editing) return updateCollection(editing, payload);
       return createCollection(payload);
     },
@@ -67,6 +71,8 @@ export default function Collections() {
       setModalOpen(false);
       setEditing(null);
       setForm(emptyForm);
+      setImageFile(null);
+      setImagePreview(null);
       toast.success(editing ? "Collection updated." : "Collection created.");
     },
     onError: (err) => toast.error(err.response?.data?.message || err.message || "Failed to save collection"),
@@ -84,6 +90,8 @@ export default function Collections() {
   const openCreate = () => {
     setEditing(null);
     setForm(emptyForm);
+    setImageFile(null);
+    setImagePreview(null);
     setModalOpen(true);
   };
 
@@ -99,6 +107,8 @@ export default function Collections() {
         status: full.status || "active",
         product_ids: (full.products || []).map((p) => p.id),
       });
+      setImageFile(null);
+      setImagePreview(full.image ? resolveUploadUrl(full.image, "collections") : null);
       setModalOpen(true);
     } catch (err) {
       toast.error(err.message || "Failed to load collection");
@@ -152,6 +162,22 @@ export default function Collections() {
         ) : (
           <DataTable
             columns={[
+              {
+                key: "image",
+                label: "Cover",
+                render: (r) =>
+                  r.image ? (
+                    <img
+                      src={resolveUploadUrl(r.image, "collections")}
+                      alt={r.name}
+                      className="w-12 h-12 rounded-md object-cover border border-border"
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded-md bg-secondary flex items-center justify-center text-[10px] text-muted-foreground">
+                      N/A
+                    </div>
+                  ),
+              },
               { key: "name", label: "Name" },
               { key: "label", label: "Label", render: (r) => r.label || "—" },
               { key: "slug", label: "Slug" },
@@ -222,6 +248,25 @@ export default function Collections() {
                   <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={3} className="mt-1" />
                 </div>
                 <div>
+                  <Label>Cover Image</Label>
+                  <Input
+                    type="file"
+                    accept="image/*"
+                    className="mt-1"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] || null;
+                      setImageFile(file);
+                      setImagePreview(file ? URL.createObjectURL(file) : imagePreview);
+                    }}
+                  />
+                  {imagePreview && (
+                    <div className="mt-2 relative w-32 h-32 border border-border rounded-lg overflow-hidden">
+                      <img src={imagePreview} alt="Collection cover" className="w-full h-full object-cover" />
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-1">Used as collection cover/banner image</p>
+                </div>
+                <div>
                   <Label>Status</Label>
                   <select
                     value={form.status}
@@ -234,18 +279,24 @@ export default function Collections() {
                 </div>
                 <div>
                   <Label>Products ({form.product_ids.length} selected)</Label>
-                  <div className="mt-2 max-h-40 overflow-y-auto border border-border rounded-lg p-2 space-y-1">
-                    {allProducts.map((p) => (
-                      <label key={p.id} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-secondary/50 p-1 rounded">
-                        <input
-                          type="checkbox"
-                          checked={form.product_ids.includes(p.id)}
-                          onChange={() => toggleProduct(p.id)}
-                        />
-                        {p.name}
-                      </label>
-                    ))}
-                    {!allProducts.length && <p className="text-xs text-muted-foreground p-2">No products available</p>}
+                  <div className="mt-2 max-h-48 overflow-y-auto border border-border rounded-lg p-2 space-y-1">
+                    {productsLoading ? (
+                      <p className="text-xs text-muted-foreground p-2">Loading products...</p>
+                    ) : allProducts.length ? (
+                      allProducts.map((p) => (
+                        <label key={p.id} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-secondary/50 p-1 rounded">
+                          <input
+                            type="checkbox"
+                            checked={form.product_ids.includes(p.id)}
+                            onChange={() => toggleProduct(p.id)}
+                          />
+                          <span className="flex-1 truncate">{p.name}</span>
+                          <span className="text-xs text-muted-foreground shrink-0">₹{(p.offer_price || p.price || 0).toLocaleString()}</span>
+                        </label>
+                      ))
+                    ) : (
+                      <p className="text-xs text-muted-foreground p-2">No products available. Add products first.</p>
+                    )}
                   </div>
                 </div>
               </div>

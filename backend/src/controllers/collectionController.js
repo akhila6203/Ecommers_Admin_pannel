@@ -5,11 +5,23 @@ import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 
 const parseProductIds = (product_ids) => {
-  if (!product_ids) return [];
-  if (Array.isArray(product_ids)) {
-    return product_ids.map((id) => parseInt(id, 10)).filter((id) => !Number.isNaN(id) && id > 0);
+  if (product_ids === undefined || product_ids === null || product_ids === "") return [];
+
+  let raw = product_ids;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) raw = parsed;
+      else raw = trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+    } catch {
+      raw = trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+    }
   }
-  return [];
+
+  if (!Array.isArray(raw)) return [];
+  return raw.map((id) => parseInt(id, 10)).filter((id) => !Number.isNaN(id) && id > 0);
 };
 
 export const getCollections = async (req, res) => {
