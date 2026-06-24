@@ -29,11 +29,14 @@ import notificationRoutes from "./routes/notificationRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import storeRoutes from "./routes/storeRoutes.js";
+import cartRoutes from "./routes/cartRoutes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 dotenv.config();
+
+console.log("SERVER FILE LOADED");
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 5000;
@@ -64,7 +67,15 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Store-Id"],
+  allowedHeaders: [
+  "Content-Type",
+  "Authorization",
+  "X-Requested-With",
+  "X-Store-Id",
+  "X-Cart-Session-Id",
+],
+
+  // allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Store-Id"],
 }));
 
 // Body Parsers
@@ -103,6 +114,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/media", mediaRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/stores", storeRoutes);
+app.use("/api/cart", cartRoutes);
 
 // Health Check
 app.get("/api/health", (req, res) => {
