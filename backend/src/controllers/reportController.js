@@ -1,5 +1,6 @@
 import { query } from "../config/db.js";
 import { successResponse, errorResponse, paginatedResponse } from "../helpers/responseHelper.js";
+import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 
 // @desc    Sales report
@@ -11,8 +12,8 @@ export const getSalesReport = async (req, res) => {
                         group_by === "yearly" ? "DATE_FORMAT(o.created_at, '%Y')" :
                         "DATE(o.created_at)";
 
-    let whereClause = "WHERE o.order_status NOT IN ('cancelled', 'returned', 'refunded')";
-    const params = [];
+    let whereClause = "WHERE o.store_id = ? AND o.order_status NOT IN ('cancelled', 'returned', 'refunded')";
+    const params = [getStoreId(req)];
 
     if (start_date) { whereClause += " AND o.created_at >= ?"; params.push(start_date); }
     if (end_date) { whereClause += " AND o.created_at <= ?"; params.push(end_date + " 23:59:59"); }
@@ -55,8 +56,8 @@ export const getSalesReport = async (req, res) => {
 export const getOrderReport = async (req, res) => {
   try {
     const { start_date, end_date, status } = req.query;
-    let whereClause = "WHERE 1=1";
-    const params = [];
+    let whereClause = "WHERE o.store_id = ?";
+    const params = [getStoreId(req)];
 
     if (start_date) { whereClause += " AND o.created_at >= ?"; params.push(start_date); }
     if (end_date) { whereClause += " AND o.created_at <= ?"; params.push(end_date + " 23:59:59"); }
@@ -67,7 +68,7 @@ export const getOrderReport = async (req, res) => {
         o.shipping_name, o.shipping_city, o.payment_method, o.created_at,
         CONCAT(c.first_name, ' ', c.last_name) as customer_name
        FROM orders o
-       LEFT JOIN customers c ON o.customer_id = c.id
+       LEFT JOIN customers c ON o.customer_id = c.id AND c.store_id = o.store_id
        ${whereClause}
        ORDER BY o.created_at DESC`,
       params
@@ -85,8 +86,8 @@ export const getOrderReport = async (req, res) => {
 export const getCustomerReport = async (req, res) => {
   try {
     const { start_date, end_date } = req.query;
-    let whereClause = "WHERE 1=1";
-    const params = [];
+    let whereClause = "WHERE c.store_id = ?";
+    const params = [getStoreId(req)];
 
     if (start_date) { whereClause += " AND c.created_at >= ?"; params.push(start_date); }
     if (end_date) { whereClause += " AND c.created_at <= ?"; params.push(end_date + " 23:59:59"); }
@@ -94,7 +95,7 @@ export const getCustomerReport = async (req, res) => {
     const customers = await query(
       `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.status, c.created_at,
         c.total_orders, c.total_spent, c.last_login_at,
-        (SELECT COUNT(*) FROM reviews WHERE customer_id = c.id) as review_count
+        (SELECT COUNT(*) FROM reviews WHERE customer_id = c.id AND store_id = c.store_id) as review_count
        FROM customers c
        ${whereClause}
        ORDER BY c.total_spent DESC`,
@@ -121,8 +122,8 @@ export const getCustomerReport = async (req, res) => {
 export const getProductReport = async (req, res) => {
   try {
     const { category_id, stock_status } = req.query;
-    let whereClause = "WHERE 1=1";
-    const params = [];
+    let whereClause = "WHERE p.store_id = ?";
+    const params = [getStoreId(req)];
 
     if (category_id) { whereClause += " AND p.category_id = ?"; params.push(category_id); }
     if (stock_status) { whereClause += " AND p.stock_status = ?"; params.push(stock_status); }
@@ -133,7 +134,7 @@ export const getProductReport = async (req, res) => {
         c.name as category_name,
         (p.price - p.offer_price) as profit_margin
        FROM products p
-       LEFT JOIN categories c ON p.category_id = c.id
+       LEFT JOIN categories c ON p.category_id = c.id AND c.store_id = p.store_id
        ${whereClause}
        ORDER BY p.total_sales DESC`,
       params
@@ -159,8 +160,8 @@ export const getProductReport = async (req, res) => {
 export const getInventoryReport = async (req, res) => {
   try {
     const { stock_status } = req.query;
-    let whereClause = "WHERE 1=1";
-    const params = [];
+    let whereClause = "WHERE p.store_id = ?";
+    const params = [getStoreId(req)];
 
     if (stock_status === "low") whereClause += " AND p.stock_status = 'low_stock'";
     else if (stock_status === "out") whereClause += " AND p.stock_status = 'out_of_stock'";
@@ -171,7 +172,7 @@ export const getInventoryReport = async (req, res) => {
         i.quantity, i.reserved_quantity, i.available_quantity,
         (i.quantity - i.available_quantity) as reserved
        FROM products p
-       LEFT JOIN inventory i ON p.id = i.product_id
+       LEFT JOIN inventory i ON p.id = i.product_id AND i.store_id = p.store_id
        ${whereClause}
        ORDER BY p.stock ASC`,
       params
@@ -198,8 +199,8 @@ export const getInventoryReport = async (req, res) => {
 export const getGstReport = async (req, res) => {
   try {
     const { start_date, end_date } = req.query;
-    let whereClause = "WHERE o.order_status = 'delivered'";
-    const params = [];
+    let whereClause = "WHERE o.store_id = ? AND o.order_status = 'delivered'";
+    const params = [getStoreId(req)];
 
     if (start_date) { whereClause += " AND o.created_at >= ?"; params.push(start_date); }
     if (end_date) { whereClause += " AND o.created_at <= ?"; params.push(end_date + " 23:59:59"); }
@@ -208,7 +209,7 @@ export const getGstReport = async (req, res) => {
       `SELECT o.order_number, o.order_status, o.created_at, o.total_amount, o.gst_amount, o.invoice_number,
         oi.product_name, oi.quantity, oi.price, oi.gst_percent, oi.gst_amount as item_gst
        FROM orders o
-       JOIN order_items oi ON o.id = oi.order_id
+       JOIN order_items oi ON o.id = oi.order_id AND oi.store_id = o.store_id
        ${whereClause}
        ORDER BY o.created_at DESC`,
       params
@@ -233,15 +234,17 @@ export const getGstReport = async (req, res) => {
 // @route   GET /api/reports/summary
 export const getReportSummary = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const today = new Date().toISOString().split("T")[0];
 
     const [todaySales] = await query(
-      "SELECT COUNT(*) as orders, COALESCE(SUM(total_amount), 0) as revenue FROM orders WHERE DATE(created_at) = ? AND order_status NOT IN ('cancelled', 'returned', 'refunded')",
-      [today]
+      "SELECT COUNT(*) as orders, COALESCE(SUM(total_amount), 0) as revenue FROM orders WHERE store_id = ? AND DATE(created_at) = ? AND order_status NOT IN ('cancelled', 'returned', 'refunded')",
+      [storeId, today]
     );
 
     const [totalStats] = await query(
-      "SELECT (SELECT COUNT(*) FROM orders) as total_orders, (SELECT COUNT(*) FROM products) as total_products, (SELECT COUNT(*) FROM customers) as total_customers, (SELECT COUNT(*) FROM reviews WHERE status = 'pending') as pending_reviews"
+      "SELECT (SELECT COUNT(*) FROM orders WHERE store_id = ?) as total_orders, (SELECT COUNT(*) FROM products WHERE store_id = ?) as total_products, (SELECT COUNT(*) FROM customers WHERE store_id = ?) as total_customers, (SELECT COUNT(*) FROM reviews WHERE store_id = ? AND status = 'pending') as pending_reviews",
+      [storeId, storeId, storeId, storeId]
     );
 
     return successResponse(res, {

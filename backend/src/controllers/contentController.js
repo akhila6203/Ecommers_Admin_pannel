@@ -1,14 +1,14 @@
 import { query } from "../config/db.js";
 import { successResponse, errorResponse } from "../helpers/responseHelper.js";
+import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 
-// @desc    Get content page details by key
-// @route   GET /api/content/:page_key
 export const getContentPage = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { page_key } = req.params;
-    const rows = await query("SELECT * FROM content_pages WHERE page_key = ?", [page_key]);
-    
+    const rows = await query("SELECT * FROM content_pages WHERE page_key = ? AND store_id = ?", [page_key, storeId]);
+
     if (rows.length > 0) {
       const page = rows[0];
       if (page_key === "contact") {
@@ -20,14 +20,13 @@ export const getContentPage = async (req, res) => {
       }
       return successResponse(res, page);
     }
-    
-    // Return empty defaults if not exists
+
     const defaults = {
       page_key,
       title: "",
       content: page_key === "contact" ? {} : "",
       image: null,
-      status: "active"
+      status: "active",
     };
     return successResponse(res, defaults);
   } catch (error) {
@@ -36,38 +35,35 @@ export const getContentPage = async (req, res) => {
   }
 };
 
-// @desc    Update or create content page details by key
-// @route   PUT /api/content/:page_key
 export const updateContentPage = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { page_key } = req.params;
     const { title, content, status } = req.body;
-    
-    // Query existing to get current image
-    const existing = await query("SELECT image FROM content_pages WHERE page_key = ?", [page_key]);
-    
+
+    const existing = await query("SELECT image FROM content_pages WHERE page_key = ? AND store_id = ?", [page_key, storeId]);
+
     let image = existing.length > 0 ? existing[0].image : null;
     if (req.file) {
       image = `uploads/content/${req.file.filename}`;
     } else if (req.body.image === "null" || req.body.image === null || req.body.image === "") {
       image = null;
     }
-    
+
     const finalContent = typeof content === "object" ? JSON.stringify(content) : content;
-    
+
     await query(
-      `INSERT INTO content_pages (page_key, title, content, image, status)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE 
-         title = VALUES(title), 
-         content = VALUES(content), 
-         image = VALUES(image), 
+      `INSERT INTO content_pages (store_id, page_key, title, content, image, status)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         title = VALUES(title),
+         content = VALUES(content),
+         image = VALUES(image),
          status = VALUES(status)`,
-      [page_key, title || null, finalContent || null, image, status || "active"]
+      [storeId, page_key, title || null, finalContent || null, image, status || "active"]
     );
-    
-    // Query updated page
-    const updated = await query("SELECT * FROM content_pages WHERE page_key = ?", [page_key]);
+
+    const updated = await query("SELECT * FROM content_pages WHERE page_key = ? AND store_id = ?", [page_key, storeId]);
     const responseData = updated[0];
     if (page_key === "contact") {
       try {
@@ -76,7 +72,7 @@ export const updateContentPage = async (req, res) => {
         responseData.content = {};
       }
     }
-    
+
     return successResponse(res, responseData, `${page_key} page updated successfully`);
   } catch (error) {
     logger.error(`Update content page error (${req.params.page_key}):`, error);

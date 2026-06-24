@@ -1,24 +1,25 @@
 import { query } from "../config/db.js";
 import { successResponse, errorResponse } from "../helpers/responseHelper.js";
+import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 
-const upsertSetting = async (groupName, key, value, type = "text") => {
+const upsertSetting = async (groupName, key, value, type = "text", storeId = 1) => {
   const settingValue =
     type === "json" || typeof value === "object"
       ? JSON.stringify(value)
       : String(value ?? "");
   await query(
-    `INSERT INTO settings (group_name, key_name, value, type)
-     VALUES (?, ?, ?, ?)
+    `INSERT INTO settings (store_id, group_name, key_name, value, type)
+     VALUES (?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE value = VALUES(value), type = VALUES(type)`,
-    [groupName, key, settingValue, type]
+    [storeId, groupName, key, settingValue, type]
   );
 };
 
-const getGroupFlat = async (groupName, defaults = {}) => {
+const getGroupFlat = async (groupName, defaults = {}, storeId = 1) => {
   const rows = await query(
-    "SELECT key_name, value, type FROM settings WHERE group_name = ?",
-    [groupName]
+    "SELECT key_name, value, type FROM settings WHERE group_name = ? AND store_id = ?",
+    [groupName, storeId]
   );
   const result = { ...defaults };
   for (const row of rows) {
@@ -35,10 +36,10 @@ const getGroupFlat = async (groupName, defaults = {}) => {
   return result;
 };
 
-const saveGroupFlat = async (groupName, data, jsonKeys = []) => {
+const saveGroupFlat = async (groupName, data, jsonKeys = [], storeId = 1) => {
   for (const [key, value] of Object.entries(data)) {
     const type = jsonKeys.includes(key) ? "json" : "text";
-    await upsertSetting(groupName, key, value, type);
+    await upsertSetting(groupName, key, value, type, storeId);
   }
 };
 
@@ -114,26 +115,26 @@ const mapStoreRowToApi = (row = {}) => ({
   storeBanner: row.store_banner || "",
 });
 
-const ensureStoreSettingsRow = async () => {
-  const rows = await query("SELECT id FROM store_settings WHERE id = 1");
+const ensureStoreSettingsRow = async (storeId = 1) => {
+  const rows = await query("SELECT id FROM store_settings WHERE store_id = ?", [storeId]);
   if (!rows.length) {
-    await query("INSERT INTO store_settings (id) VALUES (1)");
+    await query("INSERT INTO store_settings (store_id) VALUES (?)", [storeId]);
   }
 };
 
-const getStoreSettingsRow = async () => {
-  await ensureStoreSettingsRow();
-  const rows = await query("SELECT * FROM store_settings WHERE id = 1 LIMIT 1");
+const getStoreSettingsRow = async (storeId = 1) => {
+  await ensureStoreSettingsRow(storeId);
+  const rows = await query("SELECT * FROM store_settings WHERE store_id = ? LIMIT 1", [storeId]);
   return rows[0] || {};
 };
 
-const saveStoreSettingsRow = async (data) => {
-  await ensureStoreSettingsRow();
+const saveStoreSettingsRow = async (data, storeId = 1) => {
+  await ensureStoreSettingsRow(storeId);
   const merged = { ...STORE_DEFAULTS, ...data };
   const columns = Object.entries(STORE_DB_COLUMNS);
-  const sets = columns.map(([apiKey, dbCol]) => `${dbCol} = ?`);
+  const sets = columns.map(([, dbCol]) => `${dbCol} = ?`);
   const values = columns.map(([apiKey]) => merged[apiKey] ?? "");
-  await query(`UPDATE store_settings SET ${sets.join(", ")} WHERE id = 1`, values);
+  await query(`UPDATE store_settings SET ${sets.join(", ")} WHERE store_id = ?`, [...values, storeId]);
   return merged;
 };
 
@@ -183,13 +184,13 @@ const isStoreDataEmpty = (data) =>
   !data.storeLogo &&
   !data.storeAddress;
 
-const migrateLegacyStore = async (result) => {
+const migrateLegacyStore = async (result, storeId = 1) => {
   if (isStoreDataEmpty(result)) {
-    const legacyInfo = await getGroupFlat("store_information", {});
+    const legacyInfo = await getGroupFlat("store_information", {}, storeId);
     if (!isStoreDataEmpty(legacyInfo)) {
       const migrated = { ...STORE_DEFAULTS, ...legacyInfo };
       try {
-        await saveStoreSettingsRow(migrated);
+        await saveStoreSettingsRow(migrated, storeId);
       } catch (err) {
         logger.warn("Could not migrate store_information into store_settings:", err.message);
       }
@@ -197,7 +198,7 @@ const migrateLegacyStore = async (result) => {
     }
   }
 
-  const legacy = await getGroupFlat("store", {});
+  const legacy = await getGroupFlat("store", {}, storeId);
   if (!result.companyName && legacy.storeName) result.companyName = legacy.storeName;
   if (!result.contactEmail && legacy.email) result.contactEmail = legacy.email;
   if (!result.storeAddress && legacy.address) result.storeAddress = legacy.address;
@@ -208,9 +209,10 @@ const migrateLegacyStore = async (result) => {
 
 export const getStoreInformation = async (req, res) => {
   try {
-    const row = await getStoreSettingsRow();
+    const storeId = getStoreId(req);
+    const row = await getStoreSettingsRow(storeId);
     let data = mapStoreRowToApi(row);
-    data = await migrateLegacyStore(data);
+    data = await migrateLegacyStore(data, storeId);
     return successResponse(res, data);
   } catch (error) {
     logger.error("Get store information error:", error);
@@ -220,11 +222,12 @@ export const getStoreInformation = async (req, res) => {
 
 export const updateStoreInformation = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const data = { ...STORE_DEFAULTS, ...req.body };
-    const saved = await saveStoreSettingsRow(data);
+    const saved = await saveStoreSettingsRow(data, storeId);
 
-    if (saved.storeLogo) await upsertSetting("store", "logoUrl", saved.storeLogo);
-    if (saved.companyName) await upsertSetting("store", "storeName", saved.companyName);
+    if (saved.storeLogo) await upsertSetting("store", "logoUrl", saved.storeLogo, "text", storeId);
+    if (saved.companyName) await upsertSetting("store", "storeName", saved.companyName, "text", storeId);
 
     return successResponse(res, saved, "Store information saved successfully");
   } catch (error) {
@@ -298,21 +301,21 @@ const mapIntegrationRowToApi = (row = {}) => {
   return result;
 };
 
-const ensureIntegrationSettingsRow = async () => {
-  const rows = await query("SELECT id FROM integration_settings WHERE id = 1");
+const ensureIntegrationSettingsRow = async (storeId = 1) => {
+  const rows = await query("SELECT id FROM integration_settings WHERE store_id = ?", [storeId]);
   if (!rows.length) {
-    await query("INSERT INTO integration_settings (id) VALUES (1)");
+    await query("INSERT INTO integration_settings (store_id) VALUES (?)", [storeId]);
   }
 };
 
-const getIntegrationSettingsRow = async () => {
-  await ensureIntegrationSettingsRow();
-  const rows = await query("SELECT * FROM integration_settings WHERE id = 1 LIMIT 1");
+const getIntegrationSettingsRow = async (storeId = 1) => {
+  await ensureIntegrationSettingsRow(storeId);
+  const rows = await query("SELECT * FROM integration_settings WHERE store_id = ? LIMIT 1", [storeId]);
   return rows[0] || {};
 };
 
-const saveIntegrationSettingsRow = async (data) => {
-  await ensureIntegrationSettingsRow();
+const saveIntegrationSettingsRow = async (data, storeId = 1) => {
+  await ensureIntegrationSettingsRow(storeId);
   const merged = { ...INTEGRATION_DEFAULTS, ...data };
   const columns = Object.entries(INTEGRATION_DB_COLUMNS);
   const sets = columns.map(([, dbCol]) => `${dbCol} = ?`);
@@ -325,7 +328,7 @@ const saveIntegrationSettingsRow = async (data) => {
     }
     return String(merged[apiKey] ?? "");
   });
-  await query(`UPDATE integration_settings SET ${sets.join(", ")} WHERE id = 1`, values);
+  await query(`UPDATE integration_settings SET ${sets.join(", ")} WHERE store_id = ?`, [...values, storeId]);
   return mapIntegrationRowToApi(
     Object.fromEntries(columns.map(([apiKey, dbCol], i) => [dbCol, values[i]]))
   );
@@ -337,10 +340,10 @@ const isIntegrationDataEmpty = (data) =>
   !data.shiprocket_email &&
   !data.whatsapp_api_key;
 
-const migrateLegacyIntegrations = async (result) => {
+const migrateLegacyIntegrations = async (result, storeId = 1) => {
   if (!isIntegrationDataEmpty(result)) return result;
 
-  const legacy = await getGroupFlat("integrations", {});
+  const legacy = await getGroupFlat("integrations", {}, storeId);
   if (isIntegrationDataEmpty(legacy)) return result;
 
   const migrated = { ...INTEGRATION_DEFAULTS };
@@ -357,7 +360,7 @@ const migrateLegacyIntegrations = async (result) => {
   }
 
   try {
-    return await saveIntegrationSettingsRow(migrated);
+    return await saveIntegrationSettingsRow(migrated, storeId);
   } catch (err) {
     logger.warn("Could not migrate integrations into integration_settings:", err.message);
     return migrated;
@@ -366,9 +369,10 @@ const migrateLegacyIntegrations = async (result) => {
 
 export const getIntegrationSettings = async (req, res) => {
   try {
-    const row = await getIntegrationSettingsRow();
+    const storeId = getStoreId(req);
+    const row = await getIntegrationSettingsRow(storeId);
     let data = mapIntegrationRowToApi(row);
-    data = await migrateLegacyIntegrations(data);
+    data = await migrateLegacyIntegrations(data, storeId);
     return successResponse(res, data);
   } catch (error) {
     logger.error("Get integration settings error:", error);
@@ -378,7 +382,8 @@ export const getIntegrationSettings = async (req, res) => {
 
 export const updateIntegrationSettings = async (req, res) => {
   try {
-    const saved = await saveIntegrationSettingsRow({ ...INTEGRATION_DEFAULTS, ...req.body });
+    const storeId = getStoreId(req);
+    const saved = await saveIntegrationSettingsRow({ ...INTEGRATION_DEFAULTS, ...req.body }, storeId);
     return successResponse(res, saved, "Integration settings saved successfully");
   } catch (error) {
     logger.error("Update integration settings error:", error);
@@ -388,9 +393,10 @@ export const updateIntegrationSettings = async (req, res) => {
 
 export const getAboutUsSettings = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const rows = await query(
-      "SELECT key_name, value FROM settings WHERE group_name = ?",
-      ["about_us"]
+      "SELECT key_name, value FROM settings WHERE group_name = ? AND store_id = ?",
+      ["about_us", storeId]
     );
     const sectionsRow = rows.find((r) => r.key_name === "sections");
     const sections = sectionsRow?.value
@@ -405,6 +411,7 @@ export const getAboutUsSettings = async (req, res) => {
 
 export const updateAboutUsSettings = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { sections } = req.body || {};
     if (!Array.isArray(sections)) {
       return errorResponse(res, "sections must be an array", 400);
@@ -424,7 +431,7 @@ export const updateAboutUsSettings = async (req, res) => {
             }
       ),
     }));
-    await upsertSetting("about_us", "sections", normalized, "json");
+    await upsertSetting("about_us", "sections", normalized, "json", storeId);
     return successResponse(res, { sections: normalized }, "About us saved successfully");
   } catch (error) {
     logger.error("Update about us settings error:", error);
@@ -434,9 +441,10 @@ export const updateAboutUsSettings = async (req, res) => {
 
 export const getPrivacyPolicy = async (req, res) => {
   try {
-    let data = await getGroupFlat("privacy_policy", PRIVACY_DEFAULTS);
+    const storeId = getStoreId(req);
+    let data = await getGroupFlat("privacy_policy", PRIVACY_DEFAULTS, storeId);
     if (!data.content) {
-      const legacy = await getGroupFlat("privacy", {});
+      const legacy = await getGroupFlat("privacy", {}, storeId);
       if (legacy.privacyPolicy) data = { title: "Privacy Policy", content: legacy.privacyPolicy };
     }
     return successResponse(res, data);
@@ -448,8 +456,9 @@ export const getPrivacyPolicy = async (req, res) => {
 
 export const updatePrivacyPolicy = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const data = { ...PRIVACY_DEFAULTS, ...req.body };
-    await saveGroupFlat("privacy_policy", data);
+    await saveGroupFlat("privacy_policy", data, [], storeId);
     return successResponse(res, data, "Privacy policy saved successfully");
   } catch (error) {
     logger.error("Update privacy policy error:", error);
@@ -459,9 +468,10 @@ export const updatePrivacyPolicy = async (req, res) => {
 
 export const getTermsConditions = async (req, res) => {
   try {
-    let data = await getGroupFlat("terms_conditions", TERMS_DEFAULTS);
+    const storeId = getStoreId(req);
+    let data = await getGroupFlat("terms_conditions", TERMS_DEFAULTS, storeId);
     if (!data.content) {
-      const legacy = await getGroupFlat("terms", {});
+      const legacy = await getGroupFlat("terms", {}, storeId);
       if (legacy.termsContent) data = { title: "Terms & Conditions", content: legacy.termsContent };
     }
     return successResponse(res, data);
@@ -473,8 +483,9 @@ export const getTermsConditions = async (req, res) => {
 
 export const updateTermsConditions = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const data = { ...TERMS_DEFAULTS, ...req.body };
-    await saveGroupFlat("terms_conditions", data);
+    await saveGroupFlat("terms_conditions", data, [], storeId);
     return successResponse(res, data, "Terms & conditions saved successfully");
   } catch (error) {
     logger.error("Update terms conditions error:", error);
@@ -484,10 +495,11 @@ export const updateTermsConditions = async (req, res) => {
 
 export const getContactPage = async (req, res) => {
   try {
-    let data = await getGroupFlat("contact_page", CONTACT_DEFAULTS);
+    const storeId = getStoreId(req);
+    let data = await getGroupFlat("contact_page", CONTACT_DEFAULTS, storeId);
     if (!data.contactDescription) {
-      const legacyStore = await getGroupFlat("store", {});
-      const legacyContact = await getGroupFlat("contact", {});
+      const legacyStore = await getGroupFlat("store", {}, storeId);
+      const legacyContact = await getGroupFlat("contact", {}, storeId);
       if (legacyContact.contactPage) data.contactDescription = legacyContact.contactPage;
       if (legacyStore.supportEmail) data.emailAddress = legacyStore.supportEmail;
       if (legacyStore.whatsapp) data.phoneNumber = legacyStore.whatsapp;
@@ -503,8 +515,9 @@ export const getContactPage = async (req, res) => {
 
 export const updateContactPage = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const data = { ...CONTACT_DEFAULTS, ...req.body };
-    await saveGroupFlat("contact_page", data);
+    await saveGroupFlat("contact_page", data, [], storeId);
     return successResponse(res, data, "Contact page saved successfully");
   } catch (error) {
     logger.error("Update contact page error:", error);

@@ -20,7 +20,7 @@ async function seed() {
       "inventory_logs", "inventory", "order_notes", "order_timeline", "order_items",
       "orders", "cart", "wishlists", "reviews", "collection_products", "collections",
       "product_variants", "product_images", "products", "child_categories",
-      "sub_categories", "categories", "coupon_usages", "coupons", "offers", "banners",
+      "sub_categories", "categories", "coupon_usage", "coupons", "offers", "banners",
       "notifications", "email_templates", "settings", "activity_logs", "audit_logs",
       "media", "customer_addresses", "customers", "password_resets", "refresh_tokens",
       "role_permissions", "permissions", "admins", "roles",

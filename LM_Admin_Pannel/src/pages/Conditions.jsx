@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Loader2, Save, Upload, Eye, MapPin, Mail, Phone, X } from "lucide-react";
+import { Loader2, Save, Upload, Eye, MapPin, Mail, Phone, X, Plus, Trash2, Clock } from "lucide-react";
 import ReactQuill from "react-quill";
 import "react-quill/dist/quill.snow.css";
 import { getContentPage, updateContentPage } from "@/services/settingsService";
@@ -47,6 +47,57 @@ const PAGE_TABS = [
 
 const TAB_TRIGGER_CLASS =
   "rounded-md px-3 py-2 text-xs sm:text-sm font-medium whitespace-nowrap shrink-0 transition-colors data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm text-muted-foreground hover:text-foreground";
+
+const EMPTY_POLICY_FORM = { title: "", content: "" };
+
+const EMPTY_CONTACT_FORM = {
+  storeName: "",
+  email: "",
+  mobile: "",
+  alternateMobile: "",
+  address: "",
+  googleMapsUrl: "",
+  whatsappNumber: "",
+  working_hours: [],
+};
+
+function resetFormForTab(tab, setters) {
+  const {
+    setAboutForm,
+    setAboutImageFile,
+    setAboutImagePreview,
+    setContactForm,
+    setPrivacyForm,
+    setTermsForm,
+    setShippingForm,
+    setRefundForm,
+  } = setters;
+
+  switch (tab) {
+    case "about":
+      setAboutForm({ ...EMPTY_POLICY_FORM });
+      setAboutImageFile(null);
+      setAboutImagePreview(null);
+      break;
+    case "contact":
+      setContactForm({ ...EMPTY_CONTACT_FORM });
+      break;
+    case "privacy-policy":
+      setPrivacyForm({ ...EMPTY_POLICY_FORM });
+      break;
+    case "terms-conditions":
+      setTermsForm({ ...EMPTY_POLICY_FORM });
+      break;
+    case "shipping-policy":
+      setShippingForm({ ...EMPTY_POLICY_FORM });
+      break;
+    case "refund-policy":
+      setRefundForm({ ...EMPTY_POLICY_FORM });
+      break;
+    default:
+      break;
+  }
+}
 
 function EditorPreviewLayout({ editor, preview }) {
   return (
@@ -97,26 +148,30 @@ function PolicyPreview({ title, content, fallbackTitle }) {
 export default function Conditions() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState("about");
+  const skipPopulateRef = useRef(false);
 
   // Tab Content States
-  const [aboutForm, setAboutForm] = useState({ title: "", content: "" });
+  const [aboutForm, setAboutForm] = useState({ ...EMPTY_POLICY_FORM });
   const [aboutImageFile, setAboutImageFile] = useState(null);
   const [aboutImagePreview, setAboutImagePreview] = useState(null);
 
-  const [contactForm, setContactForm] = useState({
-    storeName: "",
-    email: "",
-    mobile: "",
-    alternateMobile: "",
-    address: "",
-    googleMapsUrl: "",
-    whatsappNumber: ""
-  });
+  const [contactForm, setContactForm] = useState({ ...EMPTY_CONTACT_FORM });
 
-  const [privacyForm, setPrivacyForm] = useState({ title: "", content: "" });
-  const [termsForm, setTermsForm] = useState({ title: "", content: "" });
-  const [shippingForm, setShippingForm] = useState({ title: "", content: "" });
-  const [refundForm, setRefundForm] = useState({ title: "", content: "" });
+  const [privacyForm, setPrivacyForm] = useState({ ...EMPTY_POLICY_FORM });
+  const [termsForm, setTermsForm] = useState({ ...EMPTY_POLICY_FORM });
+  const [shippingForm, setShippingForm] = useState({ ...EMPTY_POLICY_FORM });
+  const [refundForm, setRefundForm] = useState({ ...EMPTY_POLICY_FORM });
+
+  const formSetters = {
+    setAboutForm,
+    setAboutImageFile,
+    setAboutImagePreview,
+    setContactForm,
+    setPrivacyForm,
+    setTermsForm,
+    setShippingForm,
+    setRefundForm,
+  };
 
   // Queries
   const { data: pageData, isLoading: isPageLoading } = useQuery({
@@ -125,9 +180,13 @@ export default function Conditions() {
     staleTime: 0
   });
 
-  // Populate States based on Query Data
+  // Populate States based on Query Data (skip after save so fields stay cleared)
   useEffect(() => {
     if (!pageData) return;
+    if (skipPopulateRef.current) {
+      skipPopulateRef.current = false;
+      return;
+    }
     
     if (activeTab === "about") {
       setAboutForm({
@@ -145,7 +204,8 @@ export default function Conditions() {
         alternateMobile: contactData.alternateMobile || "",
         address: contactData.address || "",
         googleMapsUrl: contactData.googleMapsUrl || "",
-        whatsappNumber: contactData.whatsappNumber || ""
+        whatsappNumber: contactData.whatsappNumber || "",
+        working_hours: Array.isArray(contactData.working_hours) ? contactData.working_hours : [],
       });
     } else if (activeTab === "privacy-policy") {
       setPrivacyForm({
@@ -173,8 +233,10 @@ export default function Conditions() {
   // Mutations
   const updateMutation = useMutation({
     mutationFn: ({ key, payload }) => updateContentPage(key, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["contentPage", activeTab] });
+    onSuccess: (_, variables) => {
+      skipPopulateRef.current = true;
+      resetFormForTab(variables.key, formSetters);
+      queryClient.invalidateQueries({ queryKey: ["contentPage", variables.key] });
       toast.success("Page updated successfully!");
     },
     onError: (err) => {
@@ -209,9 +271,36 @@ export default function Conditions() {
       key: "contact",
       payload: {
         title: "Contact Us",
-        content: contactForm
-      }
+        content: {
+          ...contactForm,
+          working_hours: (contactForm.working_hours || []).filter(
+            (row) => row.label?.trim() || row.time?.trim()
+          ),
+        },
+      },
     });
+  };
+
+  const addWorkingHourRow = () => {
+    setContactForm((prev) => ({
+      ...prev,
+      working_hours: [...(prev.working_hours || []), { label: "", time: "" }],
+    }));
+  };
+
+  const updateWorkingHourRow = (index, field, value) => {
+    setContactForm((prev) => {
+      const rows = [...(prev.working_hours || [])];
+      rows[index] = { ...rows[index], [field]: value };
+      return { ...prev, working_hours: rows };
+    });
+  };
+
+  const removeWorkingHourRow = (index) => {
+    setContactForm((prev) => ({
+      ...prev,
+      working_hours: (prev.working_hours || []).filter((_, i) => i !== index),
+    }));
   };
 
   const handleSavePolicy = (key, state) => {
@@ -233,7 +322,14 @@ export default function Conditions() {
         </p>
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+      <Tabs
+        value={activeTab}
+        onValueChange={(tab) => {
+          skipPopulateRef.current = false;
+          setActiveTab(tab);
+        }}
+        className="w-full"
+      >
         <div className="sticky top-16 z-20 -mx-4 md:-mx-6 px-4 md:px-6 py-2 bg-background/95 backdrop-blur-md border-b border-border">
           <TabsList className="inline-flex h-auto w-full min-w-0 flex-nowrap justify-start gap-1 overflow-x-auto rounded-lg bg-secondary/50 p-1">
             {PAGE_TABS.map((tab) => (
@@ -363,6 +459,53 @@ export default function Conditions() {
                         <Label htmlFor="address">Store Address</Label>
                         <Textarea id="address" className="mt-1" value={contactForm.address} onChange={(e) => setContactForm({ ...contactForm, address: e.target.value })} placeholder="123 Shopping Plaza, City Centre..." rows={2} />
                       </div>
+                      <div className="md:col-span-2 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>Working Hours</Label>
+                          <Button type="button" variant="outline" size="sm" onClick={addWorkingHourRow}>
+                            <Plus className="w-4 h-4 mr-1" />
+                            Add Row
+                          </Button>
+                        </div>
+                        {(contactForm.working_hours || []).length === 0 ? (
+                          <p className="text-xs text-muted-foreground">No working hours added yet.</p>
+                        ) : (
+                          <div className="space-y-2">
+                            {(contactForm.working_hours || []).map((row, index) => (
+                              <div key={index} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2 items-end">
+                                <div>
+                                  <Label className="text-xs">Label</Label>
+                                  <Input
+                                    value={row.label || ""}
+                                    onChange={(e) => updateWorkingHourRow(index, "label", e.target.value)}
+                                    placeholder="Monday to Friday"
+                                    className="mt-1"
+                                  />
+                                </div>
+                                <div>
+                                  <Label className="text-xs">Time</Label>
+                                  <Input
+                                    value={row.time || ""}
+                                    onChange={(e) => updateWorkingHourRow(index, "time", e.target.value)}
+                                    placeholder="9:00 AM to 8:00 PM"
+                                    className="mt-1"
+                                  />
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="text-destructive shrink-0"
+                                  onClick={() => removeWorkingHourRow(index)}
+                                  title="Remove row"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                       <div className="md:col-span-2">
                         <Button type="submit" size="sm" disabled={updateMutation.isPending}>
                           {updateMutation.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
@@ -417,7 +560,23 @@ export default function Conditions() {
                             </div>
                           </div>
                         )}
-                        {!contactForm.address && !contactForm.email && !contactForm.mobile && !contactForm.alternateMobile && !contactForm.whatsappNumber && (
+                        {(contactForm.working_hours || []).length > 0 && (
+                          <div className="flex gap-2 text-sm text-foreground/80">
+                            <Clock className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                            <div>
+                              <p className="font-semibold text-foreground text-xs">Working Hours</p>
+                              <ul className="text-sm space-y-1 mt-1">
+                                {contactForm.working_hours.map((row, index) => (
+                                  <li key={index}>
+                                    <span className="font-medium">{row.label || "Hours"}:</span>{" "}
+                                    {row.time || "—"}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                        {!contactForm.address && !contactForm.email && !contactForm.mobile && !contactForm.alternateMobile && !contactForm.whatsappNumber && !(contactForm.working_hours || []).length && (
                           <p className="text-sm text-muted-foreground">Fill in contact details to preview them here.</p>
                         )}
                       </div>

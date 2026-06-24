@@ -27,7 +27,8 @@ const router = express.Router();
 router.get("/public", getPublicSettings);
 
 // Section-specific routes (must be before /:group)
-router.get("/store-information", authenticate, authorize("super_admin", "admin"), getStoreInformation);
+// router.get("/store-information", authenticate, authorize("super_admin", "admin"), getStoreInformation);
+router.get("/store-information", getStoreInformation);
 router.put("/store-information", authenticate, authorize("super_admin", "admin"), updateStoreInformation);
 
 router.get("/integrations", authenticate, authorize("super_admin", "admin"), getIntegrationSettings);
@@ -42,8 +43,10 @@ router.put("/privacy-policy", authenticate, authorize("super_admin", "admin"), u
 router.get("/terms-conditions", authenticate, authorize("super_admin", "admin"), getTermsConditions);
 router.put("/terms-conditions", authenticate, authorize("super_admin", "admin"), updateTermsConditions);
 
-router.get("/contact-page", authenticate, authorize("super_admin", "admin"), getContactPage);
+router.get("/contact-page", getContactPage);
 router.put("/contact-page", authenticate, authorize("super_admin", "admin"), updateContactPage);
+// router.get("/contact-page", authenticate, authorize("super_admin", "admin"), getContactPage);
+// router.put("/contact-page", authenticate, authorize("super_admin", "admin"), updateContactPage);
 
 // Protected generic routes
 router.post("/test-email", authenticate, authorize("super_admin", "admin"), testEmailSettings);

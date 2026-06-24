@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { testConnection } from "./config/db.js";
+import { storeMiddleware } from "./middleware/storeMiddleware.js";
 import logger from "./config/logger.js";
 import { apiLimiter } from "./middleware/rateLimiterMiddleware.js";
 import { sanitizeMiddleware } from "./helpers/sanitizeHelper.js";
@@ -27,6 +28,7 @@ import reportRoutes from "./routes/reportRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import mediaRoutes from "./routes/mediaRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import storeRoutes from "./routes/storeRoutes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +47,7 @@ app.use(helmet({
 // CORS Configuration — allow multiple frontend origins
 const allowedOrigins = [
   "http://localhost:8080",
+  "http://localhost:8081",
   "http://localhost:3000",
   "http://localhost:5173",
   process.env.FRONTEND_URL,
@@ -61,7 +64,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Store-Id"],
 }));
 
 // Body Parsers
@@ -77,6 +80,7 @@ app.use((req, res, next) => {
 // Global rate limiting — all environments (higher limit in development)
 app.use(apiLimiter);
 app.use(sanitizeMiddleware);
+app.use(storeMiddleware);
 
 // Static Files (Uploads)
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
@@ -98,6 +102,7 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/media", mediaRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/stores", storeRoutes);
 
 // Health Check
 app.get("/api/health", (req, res) => {

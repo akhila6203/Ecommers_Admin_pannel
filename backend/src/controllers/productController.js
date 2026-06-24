@@ -2,6 +2,7 @@ import { query, getConnection } from "../config/db.js";
 import { generateSlug, generateUniqueSlug } from "../helpers/slugHelper.js";
 import { generateSKU, calculateDiscount } from "../helpers/generateHelper.js";
 import { successResponse, errorResponse, paginatedResponse } from "../helpers/responseHelper.js";
+import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 
 const parseJsonField = (value) => {
@@ -230,16 +231,16 @@ async function applyVariantSyncToProduct(conn, productId, savedVariants, fallbac
   return { stock: totalStock, ...prices, discount_percentage: discount };
 }
 
-async function syncProductCollections(conn, productId, collectionIds) {
+async function syncProductCollections(conn, productId, collectionIds, storeId) {
   if (collectionIds === undefined) return;
 
   const ids = parseCollectionIds(collectionIds);
-  await conn.execute("DELETE FROM collection_products WHERE product_id = ?", [productId]);
+  await conn.execute("DELETE FROM collection_products WHERE product_id = ? AND store_id = ?", [productId, storeId]);
 
   for (let i = 0; i < ids.length; i++) {
     await conn.execute(
-      "INSERT INTO collection_products (collection_id, product_id, sort_order) VALUES (?, ?, ?)",
-      [ids[i], productId, i]
+      "INSERT INTO collection_products (store_id, collection_id, product_id, sort_order) VALUES (?, ?, ?, ?)",
+      [storeId, ids[i], productId, i]
     );
   }
 }
@@ -265,9 +266,9 @@ async function saveProductSeoData(conn, productId, seoData) {
   }
 }
 
-const checkProductSlug = async (slug, excludeId = null) => {
-  let sql = "SELECT id FROM products WHERE slug = ?";
-  const params = [slug];
+const checkProductSlug = async (slug, storeId, excludeId = null) => {
+  let sql = "SELECT id FROM products WHERE slug = ? AND store_id = ?";
+  const params = [slug, storeId];
   if (excludeId) {
     sql += " AND id != ?";
     params.push(excludeId);
@@ -280,6 +281,7 @@ const checkProductSlug = async (slug, excludeId = null) => {
 // @route   GET /api/products
 export const getProducts = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
@@ -297,8 +299,8 @@ export const getProducts = async (req, res) => {
     const sort = req.query.sort || "created_at";
     const order = req.query.order || "DESC";
 
-    let whereClause = "WHERE 1=1";
-    const params = [];
+    let whereClause = "WHERE p.store_id = ?";
+    const params = [storeId];
 
     if (search) {
       whereClause += " AND (p.name LIKE ? OR p.sku LIKE ? OR p.tags LIKE ?)";
@@ -384,17 +386,18 @@ export const getProducts = async (req, res) => {
 // @route   GET /api/products/:id
 export const getProduct = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const products = await query(
       `SELECT p.*, 
         c.name as category_name, c.slug as category_slug,
         sc.name as sub_category_name, sc.slug as sub_category_slug,
         cc.name as child_category_name, cc.slug as child_category_slug
        FROM products p 
-       LEFT JOIN categories c ON p.category_id = c.id 
-       LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id 
-       LEFT JOIN child_categories cc ON p.child_category_id = cc.id 
-       WHERE p.id = ?`,
-      [req.params.id]
+       LEFT JOIN categories c ON p.category_id = c.id AND c.store_id = p.store_id
+       LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id AND sc.store_id = p.store_id
+       LEFT JOIN child_categories cc ON p.child_category_id = cc.id AND cc.store_id = p.store_id
+       WHERE p.id = ? AND p.store_id = ?`,
+      [req.params.id, storeId]
     );
 
     if (!products.length) {
@@ -431,33 +434,100 @@ export const getProduct = async (req, res) => {
 // @route   GET /api/products/slug/:slug
 export const getProductBySlug = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
+
     const products = await query(
       `SELECT p.*, 
         c.name as category_name, c.slug as category_slug,
-        sc.name as sub_category_name, sc.slug as sub_category_slug
+        sc.name as sub_category_name, sc.slug as sub_category_slug,
+        cc.name as child_category_name, cc.slug as child_category_slug
        FROM products p 
-       LEFT JOIN categories c ON p.category_id = c.id 
-       LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id 
-       WHERE p.slug = ? AND p.status = 'active'`,
-      [req.params.slug]
+       LEFT JOIN categories c ON p.category_id = c.id AND c.store_id = p.store_id
+       LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id AND sc.store_id = p.store_id
+       LEFT JOIN child_categories cc ON p.child_category_id = cc.id AND cc.store_id = p.store_id
+       WHERE p.slug = ? AND p.store_id = ? AND p.status = 'active'`,
+      [req.params.slug, storeId]
     );
 
     if (!products.length) {
       return errorResponse(res, "Product not found", 404);
     }
 
-    return successResponse(res, products[0]);
+    const product = products[0];
+
+    product.images = await query(
+      "SELECT id, image, image_type, sort_order, alt_text FROM product_images WHERE product_id = ? ORDER BY sort_order ASC",
+      [product.id]
+    );
+
+    product.variants = await query(
+      "SELECT id, product_id, sku, size, color, option_values, price, offer_price, stock, status FROM product_variants WHERE product_id = ? AND status = 'active' ORDER BY id ASC",
+      [product.id]
+    );
+
+    product.variant_options = await query(
+      "SELECT id, product_id, option_name, option_values, sort_order FROM product_variant_options WHERE product_id = ? ORDER BY sort_order ASC",
+      [product.id]
+    );
+
+    product.fabric = collectProductFabrics(product.variants);
+
+    if (product.variants.length) {
+      product.stock = deriveProductStockFromVariants(product.variants);
+
+      const prices = deriveProductPricesFromVariants(
+        product.variants,
+        product.price,
+        product.offer_price
+      );
+
+      product.price = prices.price;
+      product.offer_price = prices.offer_price;
+    }
+
+    const thumbImg =
+      product.images.find((img) => img.image_type === "thumbnail") ||
+      product.images[0];
+
+    product.thumbnail = thumbImg?.image || product.thumbnail || null;
+
+    return successResponse(res, product);
   } catch (error) {
     logger.error("Get product by slug error:", error);
     return errorResponse(res, "Failed to fetch product", 500);
   }
 };
+// export const getProductBySlug = async (req, res) => {
+//   try {
+//     const storeId = getStoreId(req);
+//     const products = await query(
+//       `SELECT p.*, 
+//         c.name as category_name, c.slug as category_slug,
+//         sc.name as sub_category_name, sc.slug as sub_category_slug
+//        FROM products p 
+//        LEFT JOIN categories c ON p.category_id = c.id AND c.store_id = p.store_id
+//        LEFT JOIN sub_categories sc ON p.sub_category_id = sc.id AND sc.store_id = p.store_id
+//        WHERE p.slug = ? AND p.store_id = ? AND p.status = 'active'`,
+//       [req.params.slug, storeId]
+//     );
+
+//     if (!products.length) {
+//       return errorResponse(res, "Product not found", 404);
+//     }
+
+//     return successResponse(res, products[0]);
+//   } catch (error) {
+//     logger.error("Get product by slug error:", error);
+//     return errorResponse(res, "Failed to fetch product", 500);
+//   }
+// };
 
 // @desc    Create product
 // @route   POST /api/products
 export const createProduct = async (req, res) => {
   const conn = await getConnection();
   try {
+    const storeId = getStoreId(req);
     const {
       name, slug: slugInput, category_id, sub_category_id, child_category_id,
       brand, vendor, product_type, price, offer_price, cost_price, stock,
@@ -469,8 +539,8 @@ export const createProduct = async (req, res) => {
     } = req.body;
 
     const slug = slugInput?.trim()
-      ? await generateUniqueSlug(checkProductSlug, slugInput.trim())
-      : await generateUniqueSlug(checkProductSlug, name);
+      ? await generateUniqueSlug((s, id) => checkProductSlug(s, storeId, id), slugInput.trim())
+      : await generateUniqueSlug((s, id) => checkProductSlug(s, storeId, id), name);
     const sku = generateSKU(category_id ? "cat" : "gen", name, Date.now());
     const discount = calculateDiscount(parseFloat(price), parseFloat(offer_price));
     const low_stock_threshold = 5;
@@ -480,9 +550,10 @@ export const createProduct = async (req, res) => {
     await conn.beginTransaction();
 
     const [result] = await conn.execute(
-      `INSERT INTO products (name, slug, sku, category_id, sub_category_id, child_category_id, brand, vendor, product_type, price, offer_price, discount_percentage, cost_price, stock, stock_status, low_stock_threshold, short_description, long_description, tags, video_url, gst_percent, shipping_charge, is_featured, is_trending, is_best_seller, is_new_arrival, status, meta_title, meta_description, meta_keywords, created_by, updated_by) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO products (store_id, name, slug, sku, category_id, sub_category_id, child_category_id, brand, vendor, product_type, price, offer_price, discount_percentage, cost_price, stock, stock_status, low_stock_threshold, short_description, long_description, tags, video_url, gst_percent, shipping_charge, is_featured, is_trending, is_best_seller, is_new_arrival, status, meta_title, meta_description, meta_keywords, created_by, updated_by) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        storeId,
         name, slug, sku, category_id || null, sub_category_id || null, child_category_id || null,
         brand || null, vendor || null, product_type || null,
         price || 0, offer_price || 0, discount, cost_price || 0, stockQty, stockStatus, low_stock_threshold,
@@ -497,8 +568,8 @@ export const createProduct = async (req, res) => {
     const productId = result.insertId;
 
     await conn.execute(
-      "INSERT INTO inventory (product_id, quantity, available_quantity, low_stock_threshold) VALUES (?, ?, ?, ?)",
-      [productId, stockQty, stockQty, low_stock_threshold]
+      "INSERT INTO inventory (store_id, product_id, quantity, available_quantity, low_stock_threshold) VALUES (?, ?, ?, ?, ?)",
+      [storeId, productId, stockQty, stockQty, low_stock_threshold]
     );
 
     if (req.files && req.files.length > 0) {
@@ -506,15 +577,15 @@ export const createProduct = async (req, res) => {
       for (let index = 0; index < req.files.length; index++) {
         const file = req.files[index];
         await conn.execute(
-          "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, ?, ?)",
-          [productId, `uploads/products/${file.filename}`, index === 0 ? "thumbnail" : "gallery", index]
+          "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, ?, ?)",
+          [storeId, productId, `uploads/products/${file.filename}`, index === 0 ? "thumbnail" : "gallery", index]
         );
       }
       await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [thumbPath, productId]);
     } else if (req.body.thumbnail) {
       await conn.execute(
-        "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, 'thumbnail', 0)",
-        [productId, req.body.thumbnail]
+        "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'thumbnail', 0)",
+        [storeId, productId, req.body.thumbnail]
       );
       await conn.execute("UPDATE products SET thumbnail = ? WHERE id = ?", [req.body.thumbnail, productId]);
     }
@@ -537,12 +608,12 @@ export const createProduct = async (req, res) => {
     }
 
     if (collection_ids !== undefined) {
-      await syncProductCollections(conn, productId, collection_ids);
+      await syncProductCollections(conn, productId, collection_ids, storeId);
     }
 
     await conn.commit();
 
-    const product = await query("SELECT * FROM products WHERE id = ?", [productId]);
+    const product = await query("SELECT * FROM products WHERE id = ? AND store_id = ?", [productId, storeId]);
     return successResponse(res, product[0], "Product created successfully", 201);
   } catch (error) {
     await conn.rollback();
@@ -558,8 +629,9 @@ export const createProduct = async (req, res) => {
 export const updateProduct = async (req, res) => {
   const conn = await getConnection();
   try {
+    const storeId = getStoreId(req);
     const productId = req.params.id;
-    const existing = await query("SELECT * FROM products WHERE id = ?", [productId]);
+    const existing = await query("SELECT * FROM products WHERE id = ? AND store_id = ?", [productId, storeId]);
     if (!existing.length) return errorResponse(res, "Product not found", 404);
 
     const {
@@ -574,9 +646,9 @@ export const updateProduct = async (req, res) => {
 
     let slug = existing[0].slug;
     if (slugInput?.trim()) {
-      slug = await generateUniqueSlug(checkProductSlug, slugInput.trim(), productId);
+      slug = await generateUniqueSlug((s, id) => checkProductSlug(s, storeId, id), slugInput.trim(), productId);
     } else if (name && name !== existing[0].name) {
-      slug = await generateUniqueSlug(checkProductSlug, name, productId);
+      slug = await generateUniqueSlug((s, id) => checkProductSlug(s, storeId, id), name, productId);
     }
 
     const finalPrice = price !== undefined ? price : existing[0].price;
@@ -605,7 +677,7 @@ export const updateProduct = async (req, res) => {
         video_url = ?, gst_percent = ?, shipping_charge = ?,
         is_featured = ?, is_trending = ?, is_best_seller = ?, is_new_arrival = ?, status = ?,
         meta_title = ?, meta_description = ?, meta_keywords = ?, updated_by = ?
-      WHERE id = ?`,
+      WHERE id = ? AND store_id = ?`,
       [
         name || existing[0].name, slug,
         catId, subId, childId,
@@ -629,7 +701,7 @@ export const updateProduct = async (req, res) => {
         meta_title !== undefined ? meta_title : existing[0].meta_title,
         meta_description !== undefined ? meta_description : existing[0].meta_description,
         meta_keywords !== undefined ? meta_keywords : existing[0].meta_keywords,
-        req.admin?.id || null, productId,
+        req.admin?.id || null, productId, storeId,
       ]
     );
 
@@ -638,7 +710,12 @@ export const updateProduct = async (req, res) => {
         "SELECT id FROM product_images WHERE product_id = ? AND image_type = 'thumbnail' LIMIT 1",
         [productId]
       );
+      const [galleryCountRows] = await conn.execute(
+        "SELECT COUNT(*) as total FROM product_images WHERE product_id = ? AND image_type = 'gallery'",
+        [productId]
+      );
       const existingThumbId = thumbRows[0]?.id || null;
+      let gallerySort = galleryCountRows[0]?.total || 0;
       let thumbPath = null;
 
       for (let i = 0; i < req.files.length; i++) {
@@ -649,15 +726,16 @@ export const updateProduct = async (req, res) => {
             await conn.execute("UPDATE product_images SET image = ? WHERE id = ?", [imagePath, existingThumbId]);
           } else {
             await conn.execute(
-              "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, 'thumbnail', 0)",
-              [productId, imagePath]
+              "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'thumbnail', 0)",
+              [storeId, productId, imagePath]
             );
           }
         } else {
           await conn.execute(
-            "INSERT INTO product_images (product_id, image, image_type, sort_order) VALUES (?, ?, 'gallery', ?)",
-            [productId, imagePath, i]
+            "INSERT INTO product_images (store_id, product_id, image, image_type, sort_order) VALUES (?, ?, ?, 'gallery', ?)",
+            [storeId, productId, imagePath, gallerySort]
           );
+          gallerySort += 1;
         }
       }
 
@@ -693,12 +771,12 @@ export const updateProduct = async (req, res) => {
     }
 
     if (collection_ids !== undefined) {
-      await syncProductCollections(conn, productId, collection_ids);
+      await syncProductCollections(conn, productId, collection_ids, storeId);
     }
 
     await conn.commit();
 
-    const product = await query("SELECT * FROM products WHERE id = ?", [productId]);
+    const product = await query("SELECT * FROM products WHERE id = ? AND store_id = ?", [productId, storeId]);
     return successResponse(res, product[0], "Product updated successfully");
   } catch (error) {
     await conn.rollback();
@@ -713,9 +791,10 @@ export const updateProduct = async (req, res) => {
 // @route   DELETE /api/products/:id
 export const deleteProduct = async (req, res) => {
   try {
-    const existing = await query("SELECT id FROM products WHERE id = ?", [req.params.id]);
+    const storeId = getStoreId(req);
+    const existing = await query("SELECT id FROM products WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Product not found", 404);
-    await query("DELETE FROM products WHERE id = ?", [req.params.id]);
+    await query("DELETE FROM products WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     return successResponse(res, null, "Product deleted successfully");
   } catch (error) {
     logger.error("Delete product error:", error);
@@ -727,12 +806,13 @@ export const deleteProduct = async (req, res) => {
 // @route   POST /api/products/bulk-delete
 export const bulkDeleteProducts = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { ids } = req.body;
     if (!ids || !Array.isArray(ids) || !ids.length) {
       return errorResponse(res, "Product IDs are required", 400);
     }
     const placeholders = ids.map(() => "?").join(",");
-    await query(`DELETE FROM products WHERE id IN (${placeholders})`, ids);
+    await query(`DELETE FROM products WHERE store_id = ? AND id IN (${placeholders})`, [storeId, ...ids]);
     return successResponse(res, null, `${ids.length} products deleted successfully`);
   } catch (error) {
     logger.error("Bulk delete error:", error);
@@ -744,6 +824,7 @@ export const bulkDeleteProducts = async (req, res) => {
 // @route   POST /api/products/bulk-upload
 export const bulkUploadProducts = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { products } = req.body;
     if (!products || !Array.isArray(products) || !products.length) {
       return errorResponse(res, "Products array is required", 400);
@@ -751,14 +832,14 @@ export const bulkUploadProducts = async (req, res) => {
 
     let created = 0;
     for (const product of products) {
-      const slug = await generateUniqueSlug(checkProductSlug, product.name);
+      const slug = await generateUniqueSlug((s, id) => checkProductSlug(s, storeId, id), product.name);
       const sku = generateSKU("bulk", product.name, Date.now() + created);
       const discount = calculateDiscount(parseFloat(product.price), parseFloat(product.offer_price));
 
       await query(
-        `INSERT INTO products (name, slug, sku, category_id, price, offer_price, discount_percentage, stock, status, created_by) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [product.name, slug, sku, product.category_id || null, product.price || 0, product.offer_price || 0, discount, product.stock || 0, "active", req.admin?.id || null]
+        `INSERT INTO products (store_id, name, slug, sku, category_id, price, offer_price, discount_percentage, stock, status, created_by) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [storeId, product.name, slug, sku, product.category_id || null, product.price || 0, product.offer_price || 0, discount, product.stock || 0, "active", req.admin?.id || null]
       );
       created++;
     }
@@ -774,10 +855,11 @@ export const bulkUploadProducts = async (req, res) => {
 // @route   PUT /api/products/:id/featured
 export const toggleFeatured = async (req, res) => {
   try {
-    const existing = await query("SELECT id, is_featured FROM products WHERE id = ?", [req.params.id]);
+    const storeId = getStoreId(req);
+    const existing = await query("SELECT id, is_featured FROM products WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Product not found", 404);
     const newVal = existing[0].is_featured ? 0 : 1;
-    await query("UPDATE products SET is_featured = ? WHERE id = ?", [newVal, req.params.id]);
+    await query("UPDATE products SET is_featured = ? WHERE id = ? AND store_id = ?", [newVal, req.params.id, storeId]);
     return successResponse(res, { is_featured: newVal }, newVal ? "Product marked as featured" : "Product unmarked as featured");
   } catch (error) {
     logger.error("Toggle featured error:", error);
@@ -789,10 +871,11 @@ export const toggleFeatured = async (req, res) => {
 // @route   PUT /api/products/:id/trending
 export const toggleTrending = async (req, res) => {
   try {
-    const existing = await query("SELECT id, is_trending FROM products WHERE id = ?", [req.params.id]);
+    const storeId = getStoreId(req);
+    const existing = await query("SELECT id, is_trending FROM products WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Product not found", 404);
     const newVal = existing[0].is_trending ? 0 : 1;
-    await query("UPDATE products SET is_trending = ? WHERE id = ?", [newVal, req.params.id]);
+    await query("UPDATE products SET is_trending = ? WHERE id = ? AND store_id = ?", [newVal, req.params.id, storeId]);
     return successResponse(res, { is_trending: newVal }, newVal ? "Product marked as trending" : "Product unmarked as trending");
   } catch (error) {
     logger.error("Toggle trending error:", error);
@@ -804,10 +887,11 @@ export const toggleTrending = async (req, res) => {
 // @route   PUT /api/products/:id/best-seller
 export const toggleBestSeller = async (req, res) => {
   try {
-    const existing = await query("SELECT id, is_best_seller FROM products WHERE id = ?", [req.params.id]);
+    const storeId = getStoreId(req);
+    const existing = await query("SELECT id, is_best_seller FROM products WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Product not found", 404);
     const newVal = existing[0].is_best_seller ? 0 : 1;
-    await query("UPDATE products SET is_best_seller = ? WHERE id = ?", [newVal, req.params.id]);
+    await query("UPDATE products SET is_best_seller = ? WHERE id = ? AND store_id = ?", [newVal, req.params.id, storeId]);
     return successResponse(res, { is_best_seller: newVal }, newVal ? "Product marked as best seller" : "Product unmarked as best seller");
   } catch (error) {
     logger.error("Toggle best seller error:", error);
@@ -819,13 +903,14 @@ export const toggleBestSeller = async (req, res) => {
 // @route   PUT /api/products/:id/status
 export const updateProductStatus = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { status } = req.body;
     if (!["active", "inactive", "draft"].includes(status)) {
       return errorResponse(res, "Invalid status", 400);
     }
-    const existing = await query("SELECT id FROM products WHERE id = ?", [req.params.id]);
+    const existing = await query("SELECT id FROM products WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Product not found", 404);
-    await query("UPDATE products SET status = ? WHERE id = ?", [status, req.params.id]);
+    await query("UPDATE products SET status = ? WHERE id = ? AND store_id = ?", [status, req.params.id, storeId]);
     return successResponse(res, { status }, "Product status updated");
   } catch (error) {
     logger.error("Update product status error:", error);
@@ -837,21 +922,21 @@ export const updateProductStatus = async (req, res) => {
 // @route   PUT /api/products/:id/stock
 export const updateStock = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { stock } = req.body;
     if (stock === undefined || stock < 0) {
       return errorResponse(res, "Valid stock quantity is required", 400);
     }
-    const existing = await query("SELECT id, stock FROM products WHERE id = ?", [req.params.id]);
+    const existing = await query("SELECT id, stock FROM products WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Product not found", 404);
 
     const previousStock = existing[0].stock;
-    await query("UPDATE products SET stock = ? WHERE id = ?", [stock, req.params.id]);
-    await query("UPDATE inventory SET quantity = ?, available_quantity = ? WHERE product_id = ?", [stock, stock, req.params.id]);
+    await query("UPDATE products SET stock = ? WHERE id = ? AND store_id = ?", [stock, req.params.id, storeId]);
+    await query("UPDATE inventory SET quantity = ?, available_quantity = ? WHERE product_id = ? AND store_id = ?", [stock, stock, req.params.id, storeId]);
 
-    // Log inventory change
     await query(
-      "INSERT INTO inventory_logs (product_id, type, quantity, previous_quantity, new_quantity, reference_type, notes, created_by) VALUES (?, 'adjustment', ?, ?, ?, 'manual', ?, ?)",
-      [req.params.id, stock - previousStock, previousStock, stock, "Stock updated manually", req.admin?.id || null]
+      "INSERT INTO inventory_logs (store_id, product_id, type, quantity, previous_quantity, new_quantity, reference_type, notes, created_by) VALUES (?, ?, 'adjustment', ?, ?, ?, 'manual', ?, ?)",
+      [storeId, req.params.id, stock - previousStock, previousStock, stock, "Stock updated manually", req.admin?.id || null]
     );
 
     return successResponse(res, { stock }, "Stock updated successfully");
@@ -880,12 +965,15 @@ export const deleteProductImage = async (req, res) => {
 // @route   GET /api/products/export/excel
 export const exportProductsExcel = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const products = await query(
       `SELECT p.name, p.sku, p.price, p.offer_price, p.discount_percentage, p.stock, 
         p.brand, p.status, p.total_sales, c.name as category
        FROM products p 
-       LEFT JOIN categories c ON p.category_id = c.id 
-       ORDER BY p.name ASC`
+       LEFT JOIN categories c ON p.category_id = c.id AND c.store_id = p.store_id
+       WHERE p.store_id = ?
+       ORDER BY p.name ASC`,
+      [storeId]
     );
 
     return successResponse(res, products);
@@ -999,8 +1087,9 @@ export const deleteVariantOption = async (req, res) => {
 // @route   POST /api/products/:productId/variant-combinations/generate
 export const generateVariantCombinations = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const productId = req.params.productId;
-    const [product] = await query("SELECT id, price, offer_price FROM products WHERE id = ?", [productId]);
+    const [product] = await query("SELECT id, price, offer_price FROM products WHERE id = ? AND store_id = ?", [productId, storeId]);
     if (!product) return errorResponse(res, "Product not found", 404);
 
     const options = await query(
@@ -1133,8 +1222,9 @@ export const getProductSeo = async (req, res) => {
 // @route   PUT /api/products/:productId/seo
 export const updateProductSeo = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const productId = req.params.productId;
-    const [product] = await query("SELECT id FROM products WHERE id = ?", [productId]);
+    const [product] = await query("SELECT id FROM products WHERE id = ? AND store_id = ?", [productId, storeId]);
     if (!product) return errorResponse(res, "Product not found", 404);
 
     const {

@@ -40,8 +40,8 @@ router.get("/slug/:slug", getProductBySlug);
 // CRUD
 router.get("/", getProducts);
 router.get("/:id", getProduct);
-router.post("/", authenticate, authorize("super_admin", "admin", "manager"), upload.array("images", 10), uploadErrorHandler, validateProduct, auditLog("create", "product"), createProduct);
-router.put("/:id", authenticate, authorize("super_admin", "admin", "manager"), upload.array("images", 10), uploadErrorHandler, validateProduct, auditLog("update", "product"), updateProduct);
+router.post("/", authenticate, authorize("super_admin", "admin", "manager"), upload.array("images", 20), uploadErrorHandler, validateProduct, auditLog("create", "product"), createProduct);
+router.put("/:id", authenticate, authorize("super_admin", "admin", "manager"), upload.array("images", 20), uploadErrorHandler, validateProduct, auditLog("update", "product"), updateProduct);
 router.delete("/:id", authenticate, authorize("super_admin", "admin"), auditLog("delete", "product"), deleteProduct);
 
 // Bulk operations

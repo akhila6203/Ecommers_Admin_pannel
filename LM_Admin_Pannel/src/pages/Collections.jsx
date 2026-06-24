@@ -17,7 +17,7 @@ import {
 } from "@/services/collectionService";
 import { getProducts } from "@/services/productService";
 
-const emptyForm = { name: "", description: "", status: "active", product_ids: [] };
+const emptyForm = { name: "", label: "", description: "", status: "active", product_ids: [] };
 
 export default function Collections() {
   const queryClient = useQueryClient();
@@ -54,6 +54,7 @@ export default function Collections() {
     mutationFn: async () => {
       const payload = {
         name: form.name,
+        label: form.label,
         description: form.description,
         status: form.status,
         product_ids: form.product_ids,
@@ -93,6 +94,7 @@ export default function Collections() {
       const full = res.data;
       setForm({
         name: full.name || "",
+        label: full.label || "",
         description: full.description || "",
         status: full.status || "active",
         product_ids: (full.products || []).map((p) => p.id),
@@ -151,6 +153,7 @@ export default function Collections() {
           <DataTable
             columns={[
               { key: "name", label: "Name" },
+              { key: "label", label: "Label", render: (r) => r.label || "—" },
               { key: "slug", label: "Slug" },
               { key: "product_count", label: "Products", render: (r) => r.product_count ?? 0 },
               { key: "status", label: "Status", render: (r) => statusBadge(r.status) },
@@ -211,6 +214,10 @@ export default function Collections() {
                   <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="mt-1" />
                 </div>
                 <div>
+                  <Label>Label</Label>
+                  <Input value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} placeholder="e.g. New Arrivals" className="mt-1" />
+                </div>
+                <div>
                   <Label>Description</Label>
                   <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={3} className="mt-1" />
                 </div>
@@ -265,6 +272,7 @@ export default function Collections() {
               ) : (
                 <>
                   <p><strong>Name:</strong> {viewData?.data?.name}</p>
+                  {viewData?.data?.label && <p><strong>Label:</strong> {viewData.data.label}</p>}
                   <p className="text-sm text-muted-foreground">{viewData?.data?.description || "No description"}</p>
                   <h3 className="font-medium">Products ({viewData?.data?.products?.length || 0})</h3>
                   <ul className="text-sm space-y-1">

@@ -1,5 +1,6 @@
 import { query } from "../config/db.js";
 import { successResponse, errorResponse } from "../helpers/responseHelper.js";
+import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 import nodemailer from "nodemailer";
 
@@ -7,15 +8,16 @@ import nodemailer from "nodemailer";
 // @route   GET /api/settings
 export const getSettings = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const group = req.query.group || "";
     let settings;
     if (group) {
       settings = await query(
-        "SELECT * FROM settings WHERE group_name = ? ORDER BY key_name ASC",
-        [group]
+        "SELECT * FROM settings WHERE group_name = ? AND store_id = ? ORDER BY key_name ASC",
+        [group, storeId]
       );
     } else {
-      settings = await query("SELECT * FROM settings ORDER BY group_name, key_name ASC");
+      settings = await query("SELECT * FROM settings WHERE store_id = ? ORDER BY group_name, key_name ASC", [storeId]);
     }
 
     // Group settings
@@ -40,9 +42,10 @@ export const getSettings = async (req, res) => {
 // @route   GET /api/settings/:group
 export const getSettingsByGroup = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const settings = await query(
-      "SELECT * FROM settings WHERE group_name = ? ORDER BY key_name ASC",
-      [req.params.group]
+      "SELECT * FROM settings WHERE group_name = ? AND store_id = ? ORDER BY key_name ASC",
+      [req.params.group, storeId]
     );
     const result = {};
     for (const s of settings) {
@@ -63,6 +66,7 @@ export const getSettingsByGroup = async (req, res) => {
 // @route   PUT /api/settings
 export const updateSettings = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { settings } = req.body;
     if (!settings || !Object.keys(settings).length) {
       return errorResponse(res, "No settings to update", 400);
@@ -77,7 +81,7 @@ export const updateSettings = async (req, res) => {
         settingValue = typeof value === "object" ? JSON.stringify(value) : String(value);
       } else {
         // Find existing setting by key
-        const existing = await query("SELECT * FROM settings WHERE key_name = ?", [key]);
+        const existing = await query("SELECT * FROM settings WHERE key_name = ? AND store_id = ?", [key, storeId]);
         if (existing.length) {
           group_name = existing[0].group_name;
           key_name = key;
@@ -89,8 +93,8 @@ export const updateSettings = async (req, res) => {
 
       if (group_name && key_name) {
         await query(
-          "UPDATE settings SET value = ? WHERE group_name = ? AND key_name = ?",
-          [settingValue, group_name, key_name]
+          "UPDATE settings SET value = ? WHERE group_name = ? AND key_name = ? AND store_id = ?",
+          [settingValue, group_name, key_name, storeId]
         );
       }
     }
@@ -106,6 +110,7 @@ export const updateSettings = async (req, res) => {
 // @route   PUT /api/settings/:group
 export const updateSettingsByGroup = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { group } = req.params;
     const updates = req.body;
 
@@ -117,9 +122,9 @@ export const updateSettingsByGroup = async (req, res) => {
       const settingValue = typeof value === "object" ? JSON.stringify(value) : String(value);
       // Upsert - update if exists, insert if not
       await query(
-        `INSERT INTO settings (group_name, key_name, value) VALUES (?, ?, ?)
+        `INSERT INTO settings (store_id, group_name, key_name, value) VALUES (?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE value = VALUES(value)`,
-        [group, key, settingValue]
+        [storeId, group, key, settingValue]
       );
     }
 
@@ -134,7 +139,8 @@ export const updateSettingsByGroup = async (req, res) => {
 // @route   GET /api/settings/public
 export const getPublicSettings = async (req, res) => {
   try {
-    const general = await query("SELECT key_name, value FROM settings WHERE group_name IN ('general', 'seo', 'social')");
+    const storeId = getStoreId(req);
+    const general = await query("SELECT key_name, value FROM settings WHERE store_id = ? AND group_name IN ('general', 'seo', 'social')", [storeId]);
     const result = {};
     for (const s of general) {
       result[s.key_name] = s.value;

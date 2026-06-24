@@ -9,10 +9,25 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
+const MIGRATION_FILES = fs
+  .readdirSync(__dirname)
+  .filter((f) => /^\d{2}_.*\.sql$/.test(f))
+  .sort()
+  .filter((f) => f !== "14_sync_old_database.sql");
+
+// Sync old DB schema (store_id, missing columns) before content/settings inserts
+const SYNC_FILE = "14_sync_old_database.sql";
+const firstContentIdx = MIGRATION_FILES.findIndex((f) => f >= "10_");
+if (firstContentIdx >= 0) {
+  MIGRATION_FILES.splice(firstContentIdx, 0, SYNC_FILE);
+} else {
+  MIGRATION_FILES.push(SYNC_FILE);
+}
+
 async function runMigrations() {
   const connection = await mysql.createConnection({
     host: process.env.DB_HOST || "localhost",
-    port: parseInt(process.env.DB_PORT) || 3306,
+    port: parseInt(process.env.DB_PORT, 10) || 3306,
     user: process.env.DB_USER || "root",
     password: process.env.DB_PASSWORD || "",
     multipleStatements: true,
@@ -21,20 +36,20 @@ async function runMigrations() {
   try {
     console.log("Connected to MySQL server");
 
-    const schemaPath = path.join(__dirname, "schema.sql");
-    const schemaSQL = fs.readFileSync(schemaPath, "utf8");
+    for (const file of MIGRATION_FILES) {
+      const sqlPath = path.join(__dirname, file);
+      const sql = fs.readFileSync(sqlPath, "utf8");
+      console.log(`Running ${file}...`);
+      await connection.query(sql);
+      console.log(`✓ ${file}`);
+    }
 
-    console.log("Running schema migration...");
-    await connection.query(schemaSQL);
-    console.log("✓ Schema migration completed successfully");
-
-    console.log("Database 'lms' is ready with all tables");
+    console.log("All migrations completed successfully");
   } catch (error) {
-    console.error("Migration failed:", error);
+    console.error("Migration failed:", error.message);
     process.exit(1);
   } finally {
     await connection.end();
-    console.log("Database connection closed");
   }
 }
 

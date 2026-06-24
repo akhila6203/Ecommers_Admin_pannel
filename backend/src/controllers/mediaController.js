@@ -1,5 +1,6 @@
 import { query } from "../config/db.js";
 import { successResponse, errorResponse, paginatedResponse } from "../helpers/responseHelper.js";
+import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 
 // @desc    Get all media
@@ -13,8 +14,9 @@ export const getMedia = async (req, res) => {
     const type = req.query.type || "";
     const search = req.query.search || "";
 
-    let whereClause = "WHERE 1=1";
-    const params = [];
+    const storeId = getStoreId(req);
+    let whereClause = "WHERE m.store_id = ?";
+    const params = [storeId];
 
     if (folder) { whereClause += " AND m.folder = ?"; params.push(folder); }
     if (type) { whereClause += " AND m.type = ?"; params.push(type); }
@@ -29,7 +31,7 @@ export const getMedia = async (req, res) => {
     );
 
     // Get folder list
-    const folders = await query("SELECT DISTINCT folder FROM media ORDER BY folder ASC");
+    const folders = await query("SELECT DISTINCT folder FROM media WHERE store_id = ? ORDER BY folder ASC", [storeId]);
 
     return paginatedResponse(res, media, total, page, limit, { folders: folders.map(f => f.folder) });
   } catch (error) {
@@ -47,9 +49,11 @@ export const uploadMedia = async (req, res) => {
     const { folder, alt_text } = req.body;
     const file = req.file;
 
+    const storeId = getStoreId(req);
     const result = await query(
-      "INSERT INTO media (filename, original_name, path, url, type, size, mime_type, folder, alt_text, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO media (store_id, filename, original_name, path, url, type, size, mime_type, folder, alt_text, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
+        storeId,
         file.filename,
         file.originalname,
         file.path.replace(/\\/g, "/"),
@@ -63,7 +67,7 @@ export const uploadMedia = async (req, res) => {
       ]
     );
 
-    const media = await query("SELECT * FROM media WHERE id = ?", [result.insertId]);
+    const media = await query("SELECT * FROM media WHERE id = ? AND store_id = ?", [result.insertId, storeId]);
     return successResponse(res, media[0], "File uploaded successfully", 201);
   } catch (error) {
     logger.error("Upload media error:", error);
@@ -77,13 +81,15 @@ export const uploadMultipleMedia = async (req, res) => {
   try {
     if (!req.files || !req.files.length) return errorResponse(res, "No files uploaded", 400);
 
+    const storeId = getStoreId(req);
     const { folder } = req.body;
     const uploaded = [];
 
     for (const file of req.files) {
       const result = await query(
-        "INSERT INTO media (filename, original_name, path, url, type, size, mime_type, folder, alt_text, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO media (store_id, filename, original_name, path, url, type, size, mime_type, folder, alt_text, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
+          storeId,
           file.filename,
           file.originalname,
           file.path.replace(/\\/g, "/"),
@@ -96,7 +102,7 @@ export const uploadMultipleMedia = async (req, res) => {
           req.admin?.id || null,
         ]
       );
-      const media = await query("SELECT * FROM media WHERE id = ?", [result.insertId]);
+      const media = await query("SELECT * FROM media WHERE id = ? AND store_id = ?", [result.insertId, storeId]);
       uploaded.push(media[0]);
     }
 
@@ -111,13 +117,14 @@ export const uploadMultipleMedia = async (req, res) => {
 // @route   PUT /api/media/:id
 export const updateMedia = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const { alt_text, folder } = req.body;
-    const existing = await query("SELECT * FROM media WHERE id = ?", [req.params.id]);
+    const existing = await query("SELECT * FROM media WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Media not found", 404);
 
     await query(
-      "UPDATE media SET alt_text = COALESCE(?, alt_text), folder = COALESCE(?, folder) WHERE id = ?",
-      [alt_text || null, folder || null, req.params.id]
+      "UPDATE media SET alt_text = COALESCE(?, alt_text), folder = COALESCE(?, folder) WHERE id = ? AND store_id = ?",
+      [alt_text || null, folder || null, req.params.id, storeId]
     );
     return successResponse(res, null, "Media updated");
   } catch (error) {
@@ -130,9 +137,10 @@ export const updateMedia = async (req, res) => {
 // @route   DELETE /api/media/:id
 export const deleteMedia = async (req, res) => {
   try {
-    const existing = await query("SELECT * FROM media WHERE id = ?", [req.params.id]);
+    const storeId = getStoreId(req);
+    const existing = await query("SELECT * FROM media WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     if (!existing.length) return errorResponse(res, "Media not found", 404);
-    await query("DELETE FROM media WHERE id = ?", [req.params.id]);
+    await query("DELETE FROM media WHERE id = ? AND store_id = ?", [req.params.id, storeId]);
     return successResponse(res, null, "Media deleted");
   } catch (error) {
     logger.error("Delete media error:", error);
@@ -144,8 +152,10 @@ export const deleteMedia = async (req, res) => {
 // @route   GET /api/media/folders
 export const getMediaFolders = async (req, res) => {
   try {
+    const storeId = getStoreId(req);
     const folders = await query(
-      "SELECT folder, COUNT(*) as file_count FROM media GROUP BY folder ORDER BY folder ASC"
+      "SELECT folder, COUNT(*) as file_count FROM media WHERE store_id = ? GROUP BY folder ORDER BY folder ASC",
+      [storeId]
     );
     return successResponse(res, folders);
   } catch (error) {

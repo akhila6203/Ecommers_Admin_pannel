@@ -11,8 +11,7 @@
     "test:audit": "node scripts/qa-audit.js",
     "migrate": "node migrations/migrate.js",
     "seed": "node seeds/seed.js",
-    "seed:admin": "node seeds/adminSeeder.js",
-    "migrate:indexes": "node migrations/run_indexes.js"
+    "seed:admin": "node seeds/adminSeeder.js"
   },
   "keywords": [
     "ecommerce",

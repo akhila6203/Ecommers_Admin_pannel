@@ -1,0 +1,183 @@
+-- ============================================================
+-- LM Shopping Mall - Products, variants, SEO, inventory
+-- Database: lms (matches XAMPP MariaDB schema)
+-- ============================================================
+
+USE lms;
+
+CREATE TABLE IF NOT EXISTS `products` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `store_id` int(11) NOT NULL DEFAULT 1,
+  `name` varchar(500) NOT NULL,
+  `slug` varchar(500) NOT NULL,
+  `sku` varchar(100) DEFAULT NULL,
+  `category_id` int(11) DEFAULT NULL,
+  `sub_category_id` int(11) DEFAULT NULL,
+  `child_category_id` int(11) DEFAULT NULL,
+  `brand` varchar(255) DEFAULT NULL,
+  `vendor` varchar(255) DEFAULT NULL,
+  `product_type` varchar(255) DEFAULT NULL,
+  `price` decimal(12,2) NOT NULL DEFAULT 0.00,
+  `offer_price` decimal(12,2) DEFAULT 0.00,
+  `discount_percentage` int(11) DEFAULT 0,
+  `cost_price` decimal(12,2) DEFAULT 0.00,
+  `stock` int(11) DEFAULT 0,
+  `stock_status` enum('in_stock','out_of_stock','low_stock') DEFAULT 'in_stock',
+  `low_stock_threshold` int(11) DEFAULT 5,
+  `short_description` text DEFAULT NULL,
+  `long_description` longtext DEFAULT NULL,
+  `tags` text DEFAULT NULL,
+  `thumbnail` varchar(500) DEFAULT NULL,
+  `video_url` varchar(500) DEFAULT NULL,
+  `gst_percent` decimal(5,2) DEFAULT 0.00,
+  `shipping_charge` decimal(10,2) DEFAULT 0.00,
+  `is_featured` tinyint(1) DEFAULT 0,
+  `is_trending` tinyint(1) DEFAULT 0,
+  `is_best_seller` tinyint(1) DEFAULT 0,
+  `is_new_arrival` tinyint(1) DEFAULT 0,
+  `status` enum('active','inactive','draft') DEFAULT 'active',
+  `meta_title` varchar(255) DEFAULT NULL,
+  `meta_description` text DEFAULT NULL,
+  `meta_keywords` text DEFAULT NULL,
+  `total_sales` int(11) DEFAULT 0,
+  `avg_rating` decimal(3,2) DEFAULT 0.00,
+  `review_count` int(11) DEFAULT 0,
+  `created_by` int(11) DEFAULT NULL,
+  `updated_by` int(11) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_products_store_slug` (`store_id`,`slug`),
+  UNIQUE KEY `uq_products_store_sku` (`store_id`,`sku`),
+  KEY `sub_category_id` (`sub_category_id`),
+  KEY `child_category_id` (`child_category_id`),
+  KEY `idx_products_slug` (`slug`),
+  KEY `idx_products_sku` (`sku`),
+  KEY `idx_products_category` (`category_id`),
+  KEY `idx_products_status` (`status`),
+  KEY `idx_products_featured` (`is_featured`),
+  KEY `idx_products_trending` (`is_trending`),
+  KEY `idx_products_bestseller` (`is_best_seller`),
+  KEY `idx_products_stock` (`stock`),
+  KEY `idx_products_category_id` (`category_id`),
+  KEY `idx_products_category_status` (`category_id`,`status`),
+  KEY `idx_products_brand` (`brand`),
+  KEY `idx_products_store_id` (`store_id`),
+  FULLTEXT KEY `idx_products_search` (`name`,`short_description`,`tags`),
+  CONSTRAINT `products_ibfk_1` FOREIGN KEY (`category_id`) REFERENCES `categories` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `products_ibfk_2` FOREIGN KEY (`sub_category_id`) REFERENCES `sub_categories` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `products_ibfk_3` FOREIGN KEY (`child_category_id`) REFERENCES `child_categories` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `product_images` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `store_id` int(11) NOT NULL DEFAULT 1,
+  `product_id` int(11) NOT NULL,
+  `image` varchar(500) NOT NULL,
+  `image_type` enum('thumbnail','gallery') DEFAULT 'gallery',
+  `sort_order` int(11) DEFAULT 0,
+  `alt_text` varchar(255) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_product_images_product` (`product_id`),
+  KEY `idx_product_images_store_id` (`store_id`),
+  CONSTRAINT `product_images_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `product_variants` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `store_id` int(11) NOT NULL DEFAULT 1,
+  `product_id` int(11) NOT NULL,
+  `sku` varchar(100) DEFAULT NULL,
+  `size` varchar(50) DEFAULT NULL,
+  `color` varchar(50) DEFAULT NULL,
+  `option_values` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`option_values`)),
+  `price` decimal(12,2) DEFAULT NULL,
+  `offer_price` decimal(12,2) DEFAULT NULL,
+  `stock` int(11) DEFAULT 0,
+  `image` varchar(500) DEFAULT NULL,
+  `status` enum('active','inactive') DEFAULT 'active',
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_product_variants_product` (`product_id`),
+  KEY `idx_product_variants_store_id` (`store_id`),
+  CONSTRAINT `product_variants_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `product_variant_options` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `store_id` int(11) NOT NULL DEFAULT 1,
+  `product_id` int(11) NOT NULL,
+  `option_name` varchar(100) NOT NULL,
+  `option_values` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`option_values`)),
+  `sort_order` int(11) DEFAULT 0,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_pvo_product` (`product_id`),
+  KEY `idx_product_variant_options_store_id` (`store_id`),
+  CONSTRAINT `product_variant_options_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `product_seo` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `store_id` int(11) NOT NULL DEFAULT 1,
+  `product_id` int(11) NOT NULL,
+  `seo_title` varchar(255) DEFAULT NULL,
+  `seo_description` text DEFAULT NULL,
+  `keywords` text DEFAULT NULL,
+  `canonical_url` varchar(500) DEFAULT NULL,
+  `meta_robots` varchar(50) DEFAULT 'index,follow',
+  `og_title` varchar(255) DEFAULT NULL,
+  `og_description` text DEFAULT NULL,
+  `og_image` varchar(500) DEFAULT NULL,
+  `twitter_title` varchar(255) DEFAULT NULL,
+  `twitter_description` text DEFAULT NULL,
+  `twitter_image` varchar(500) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `product_id` (`product_id`),
+  KEY `idx_product_seo_product` (`product_id`),
+  KEY `idx_product_seo_store_id` (`store_id`),
+  CONSTRAINT `product_seo_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `inventory` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `store_id` int(11) NOT NULL DEFAULT 1,
+  `product_id` int(11) NOT NULL,
+  `quantity` int(11) NOT NULL DEFAULT 0,
+  `reserved_quantity` int(11) DEFAULT 0,
+  `available_quantity` int(11) DEFAULT 0,
+  `low_stock_threshold` int(11) DEFAULT 5,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_inventory_product` (`product_id`),
+  KEY `idx_inventory_store_id` (`store_id`),
+  CONSTRAINT `inventory_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `inventory_logs` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `store_id` int(11) NOT NULL DEFAULT 1,
+  `product_id` int(11) NOT NULL,
+  `type` enum('purchase','sale','adjustment','return','transfer') NOT NULL,
+  `quantity` int(11) NOT NULL,
+  `previous_quantity` int(11) DEFAULT NULL,
+  `new_quantity` int(11) DEFAULT NULL,
+  `reference_type` varchar(100) DEFAULT NULL,
+  `reference_id` int(11) DEFAULT NULL,
+  `notes` text DEFAULT NULL,
+  `created_by` int(11) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_inventory_logs_product` (`product_id`),
+  KEY `idx_inventory_logs_type` (`type`),
+  KEY `idx_inventory_logs_created` (`created_at`),
+  KEY `idx_inventory_logs_store_id` (`store_id`),
+  CONSTRAINT `inventory_logs_ibfk_1` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+

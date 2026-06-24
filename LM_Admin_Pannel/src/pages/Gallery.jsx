@@ -7,6 +7,11 @@ import { resolveUploadUrl, PLACEHOLDER } from "@/utils/imageUrl";
 
 const emptyForm = {
   title: "",
+  subtitle: "",
+  subtitle1: "",
+  description: "",
+  button_text: "",
+  button_link: "",
 };
 
 export default function Gallery() {
@@ -14,7 +19,7 @@ export default function Gallery() {
 
   const getImageUrl = (imagePath) => resolveUploadUrl(imagePath, "banners");
 
-  const { data: bannersResponse, isLoading, error, refetch } = useQuery({
+  const { data: bannersResponse, isLoading, error } = useQuery({
     queryKey: ["banners"],
     queryFn: () => getBanners(),
   });
@@ -59,6 +64,11 @@ export default function Gallery() {
 
     const payload = new FormData();
     payload.append("title", form.title);
+    payload.append("subtitle", form.subtitle);
+    payload.append("subtitle1", form.subtitle1);
+    payload.append("description", form.description);
+    payload.append("button_text", form.button_text);
+    payload.append("button_link", form.button_link);
     if (imageFile) {
       payload.append("image", imageFile);
     }
@@ -98,6 +108,11 @@ export default function Gallery() {
     setEditing(banner.id);
     setForm({
       title: banner.title || "",
+      subtitle: banner.subtitle || "",
+      subtitle1: banner.subtitle1 || "",
+      description: banner.description || "",
+      button_text: banner.button_text || "",
+      button_link: banner.button_link || "",
     });
     setImageFile(null);
     setPreviewUrl(getImageUrl(banner.image));
@@ -121,6 +136,9 @@ export default function Gallery() {
   const inputClass =
     "h-10 px-3 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30";
 
+  const textareaClass =
+    "w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 min-h-[80px]";
+
   if (isLoading) {
     return (
       <div className="p-6 max-w-[1100px] mx-auto flex items-center justify-center min-h-[300px]">
@@ -139,7 +157,6 @@ export default function Gallery() {
 
   return (
     <div className="p-6 max-w-[1100px] mx-auto space-y-6">
-      {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-heading font-bold text-foreground">
@@ -159,7 +176,6 @@ export default function Gallery() {
         </button>
       </div>
 
-      {/* Banner Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {banners.length > 0 ? (
           banners.map((banner) => (
@@ -182,6 +198,16 @@ export default function Gallery() {
                 <h3 className="font-semibold text-foreground">
                   {banner.title}
                 </h3>
+                {(banner.subtitle || banner.subtitle1) && (
+                  <p className="text-sm text-muted-foreground mt-1">
+                    {[banner.subtitle, banner.subtitle1].filter(Boolean).join(" · ")}
+                  </p>
+                )}
+                {banner.button_text && (
+                  <span className="inline-block mt-2 text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded">
+                    {banner.button_text}
+                  </span>
+                )}
 
                 <div className="flex gap-2 mt-3">
                   <button
@@ -212,11 +238,9 @@ export default function Gallery() {
         )}
       </div>
 
-      {/* Modal Popup */}
       {openModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-[650px] bg-card rounded-2xl border border-border shadow-xl">
-            
+          <div className="w-full max-w-[650px] max-h-[90vh] overflow-y-auto bg-card rounded-2xl border border-border shadow-xl">
             <div className="flex items-center justify-between px-5 py-4 border-b border-border">
               <h2 className="text-lg font-semibold text-foreground">
                 {editing ? "Update Banner" : "Add Banner"}
@@ -230,22 +254,80 @@ export default function Gallery() {
               </button>
             </div>
 
-            
             <form
               onSubmit={handleSubmit}
               className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4"
             >
               <div>
                 <label className="text-sm font-medium block mb-1">
-                  Banner Title *
+                  Title *
                 </label>
                 <input
                   value={form.title}
-                  onChange={(e) =>
-                    setForm({ ...form, title: e.target.value })
-                  }
+                  onChange={(e) => setForm({ ...form, title: e.target.value })}
                   className={`w-full ${inputClass}`}
-                  placeholder="Enter banner title"
+                  placeholder="New Collection 2026"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium block mb-1">
+                  Subtitle
+                </label>
+                <input
+                  value={form.subtitle}
+                  onChange={(e) => setForm({ ...form, subtitle: e.target.value })}
+                  className={`w-full ${inputClass}`}
+                  placeholder="Timeless"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium block mb-1">
+                  Subtitle 1
+                </label>
+                <input
+                  value={form.subtitle1}
+                  onChange={(e) => setForm({ ...form, subtitle1: e.target.value })}
+                  className={`w-full ${inputClass}`}
+                  placeholder="Saree"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium block mb-1">
+                  Button Text
+                </label>
+                <input
+                  value={form.button_text}
+                  onChange={(e) => setForm({ ...form, button_text: e.target.value })}
+                  className={`w-full ${inputClass}`}
+                  placeholder="Shop Now"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="text-sm font-medium block mb-1">
+                  Description
+                </label>
+                <textarea
+                  value={form.description}
+                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  className={textareaClass}
+                  placeholder="Discover our handcrafted collection..."
+                  rows={3}
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="text-sm font-medium block mb-1">
+                  Button Link
+                </label>
+                <input
+                  value={form.button_link}
+                  onChange={(e) => setForm({ ...form, button_link: e.target.value })}
+                  className={`w-full ${inputClass}`}
+                  placeholder="/collections/new-arrivals"
                 />
               </div>
 
