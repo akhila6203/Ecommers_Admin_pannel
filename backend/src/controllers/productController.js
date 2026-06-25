@@ -816,9 +816,18 @@ export const getProductBySlug = async (req, res) => {
     );
 
     product.variants = await query(
-      "SELECT id, product_id, sku, size, color, option_values, price, offer_price, stock, status FROM product_variants WHERE product_id = ? AND status = 'active' ORDER BY id ASC",
-      [product.id]
+      `SELECT id, store_id, product_id, sku, size, color, fabric, option_values,
+              price, offer_price, stock, image, status
+      FROM product_variants
+      WHERE product_id = ? AND store_id = ? AND status = 'active'
+      ORDER BY id ASC`,
+      [product.id, storeId]
     );
+    product.variants = await attachVariantImages(product.variants, product.id);
+    // product.variants = await query(
+    //   "SELECT id, product_id, sku, size, color, option_values, price, offer_price, stock, status FROM product_variants WHERE product_id = ? AND status = 'active' ORDER BY id ASC",
+    //   [product.id]
+    // );
 
     product.variant_options = await query(
       "SELECT id, product_id, option_name, option_values, sort_order FROM product_variant_options WHERE product_id = ? ORDER BY sort_order ASC",
