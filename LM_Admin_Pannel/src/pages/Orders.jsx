@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import {
   getOrders,
   getOrder,
+  getOrderStats,
   updateOrderStatus,
   updatePaymentStatus,
   cancelOrder,
@@ -39,20 +40,42 @@ function statusBadge(status) {
   );
 }
 
+function paymentBadge(status) {
+  const s = (status || "").toLowerCase();
+  const colors = {
+    paid: "bg-green-100 text-green-700",
+    pending: "bg-orange-100 text-orange-700",
+    failed: "bg-red-100 text-red-700",
+    refunded: "bg-purple-100 text-purple-700",
+  };
+  return (
+    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors[s] || "bg-secondary"}`}>
+      {formatStatus(status)}
+    </span>
+  );
+}
+
 export default function Orders() {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState("");
   const [detailId, setDetailId] = useState(null);
   const [statusDraft, setStatusDraft] = useState("");
   const [paymentDraft, setPaymentDraft] = useState("");
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["orders", page],
-    queryFn: () => getOrders({ page, limit: 20 }),
+    queryKey: ["orders", page, statusFilter],
+    queryFn: () => getOrders({ page, limit: 20, ...(statusFilter ? { status: statusFilter } : {}) }),
+  });
+
+  const { data: statsData } = useQuery({
+    queryKey: ["orders-stats"],
+    queryFn: getOrderStats,
   });
 
   const orders = data?.data || [];
   const pagination = data?.pagination;
+  const stats = statsData?.data;
 
   const { data: orderDetail, isLoading: detailLoading } = useQuery({
     queryKey: ["order", detailId],
@@ -71,6 +94,7 @@ export default function Orders() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["orders"] });
+    queryClient.invalidateQueries({ queryKey: ["orders-stats"] });
     if (detailId) queryClient.invalidateQueries({ queryKey: ["order", detailId] });
   };
 
@@ -96,14 +120,13 @@ export default function Orders() {
     onError: (err) => toast.error(err.message || "Failed to cancel order"),
   });
 
-  const openDetail = (id) => {
-    setDetailId(id);
-  };
-
-  const statusCounts = ORDER_STATUSES.slice(0, 4).map((s) => ({
-    status: s,
-    count: orders.filter((o) => (o.order_status || o.status || "").toLowerCase() === s).length,
-  }));
+  const statusCards = [
+    { key: "", label: "All", count: stats?.total_orders ?? pagination?.total ?? orders.length },
+    { key: "pending", label: "Pending", count: stats?.by_status?.pending ?? 0 },
+    { key: "confirmed", label: "Confirmed", count: stats?.by_status?.confirmed ?? 0 },
+    { key: "shipped", label: "Shipped", count: stats?.by_status?.shipped ?? 0 },
+    { key: "delivered", label: "Delivered", count: stats?.by_status?.delivered ?? 0 },
+  ];
 
   return (
     <PageQueryState
@@ -116,16 +139,45 @@ export default function Orders() {
         <div>
           <h1 className="text-2xl font-heading font-bold text-foreground">Orders</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Manage customer orders ({pagination?.total ?? orders.length} total)
+            Real-time orders from website checkout — {pagination?.total ?? orders.length} total
           </p>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {statusCounts.map(({ status, count }) => (
-            <div key={status} className="bg-card rounded-xl border border-border p-4 text-center">
-              <p className="text-2xl font-heading font-bold text-primary">{count}</p>
-              <p className="text-xs text-muted-foreground mt-1">{formatStatus(status)}</p>
+        {stats && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="bg-card rounded-xl border border-border p-4">
+              <p className="text-2xl font-heading font-bold text-primary">{stats.today_orders}</p>
+              <p className="text-xs text-muted-foreground mt-1">Today&apos;s Orders</p>
             </div>
+            <div className="bg-card rounded-xl border border-border p-4">
+              <p className="text-2xl font-heading font-bold text-green-600">₹{Number(stats.today_revenue || 0).toLocaleString()}</p>
+              <p className="text-xs text-muted-foreground mt-1">Today&apos;s Revenue</p>
+            </div>
+            <div className="bg-card rounded-xl border border-border p-4">
+              <p className="text-2xl font-heading font-bold">{stats.total_orders}</p>
+              <p className="text-xs text-muted-foreground mt-1">All Orders</p>
+            </div>
+            <div className="bg-card rounded-xl border border-border p-4">
+              <p className="text-2xl font-heading font-bold">₹{Number(stats.total_revenue || 0).toLocaleString()}</p>
+              <p className="text-xs text-muted-foreground mt-1">Total Revenue</p>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          {statusCards.map(({ key, label, count }) => (
+            <button
+              key={key || "all"}
+              type="button"
+              onClick={() => { setStatusFilter(key); setPage(1); }}
+              className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                statusFilter === key
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "bg-card border-border hover:bg-secondary"
+              }`}
+            >
+              {label} ({count})
+            </button>
           ))}
         </div>
 
@@ -135,7 +187,7 @@ export default function Orders() {
             {
               key: "customer_name",
               label: "Customer",
-              render: (r) => r.customer_name || `${r.first_name || ""} ${r.last_name || ""}`.trim() || "—",
+              render: (r) => r.shipping_name || `${r.first_name || ""} ${r.last_name || ""}`.trim() || r.email || "—",
             },
             {
               key: "items_count",
@@ -146,6 +198,16 @@ export default function Orders() {
               key: "total_amount",
               label: "Amount",
               render: (r) => `₹${(r.total_amount || 0).toLocaleString()}`,
+            },
+            {
+              key: "payment_method",
+              label: "Payment",
+              render: (r) => (r.payment_method || "cod").toUpperCase(),
+            },
+            {
+              key: "payment_status",
+              label: "Paid",
+              render: (r) => paymentBadge(r.payment_status),
             },
             {
               key: "created_at",
@@ -161,7 +223,7 @@ export default function Orders() {
               key: "actions",
               label: "",
               render: (r) => (
-                <Button size="sm" variant="outline" onClick={() => openDetail(r.id)}>
+                <Button size="sm" variant="outline" onClick={() => setDetailId(r.id)}>
                   <Eye className="w-4 h-4 mr-1" />
                   View
                 </Button>
@@ -187,7 +249,7 @@ export default function Orders() {
             <div className="bg-card rounded-xl border border-border w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-semibold">Order #{order?.order_number || detailId}</h2>
-                <button onClick={() => setDetailId(null)}><X className="w-5 h-5" /></button>
+                <button type="button" onClick={() => setDetailId(null)}><X className="w-5 h-5" /></button>
               </div>
 
               {detailLoading ? (
@@ -195,10 +257,18 @@ export default function Orders() {
               ) : order ? (
                 <>
                   <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div><span className="text-muted-foreground">Customer:</span> {order.customer?.first_name} {order.customer?.last_name}</div>
+                    <div><span className="text-muted-foreground">Customer:</span> {order.customer?.first_name} {order.customer?.last_name || order.shipping_name}</div>
                     <div><span className="text-muted-foreground">Email:</span> {order.email || order.customer?.email || "—"}</div>
-                    <div><span className="text-muted-foreground">Phone:</span> {order.phone || "—"}</div>
+                    <div><span className="text-muted-foreground">Phone:</span> {order.phone || order.shipping_phone || "—"}</div>
                     <div><span className="text-muted-foreground">Total:</span> ₹{(order.total_amount || 0).toLocaleString()}</div>
+                    <div><span className="text-muted-foreground">Payment:</span> {(order.payment_method || "cod").toUpperCase()} — {paymentBadge(order.payment_status)}</div>
+                    <div><span className="text-muted-foreground">Source:</span> Website Checkout</div>
+                  </div>
+
+                  <div className="text-sm border border-border rounded-lg p-3">
+                    <p className="font-medium mb-1">Shipping Address</p>
+                    <p>{order.shipping_name}, {order.shipping_phone}</p>
+                    <p>{order.shipping_address}, {order.shipping_city}, {order.shipping_state} — {order.shipping_pincode}</p>
                   </div>
 
                   <div>
@@ -212,6 +282,20 @@ export default function Orders() {
                       ))}
                     </ul>
                   </div>
+
+                  {(order.timeline?.length > 0) && (
+                    <div>
+                      <h3 className="font-medium mb-2">Timeline</h3>
+                      <ul className="text-sm space-y-1 border border-border rounded-lg p-3">
+                        {order.timeline.map((entry, idx) => (
+                          <li key={idx} className="flex justify-between text-muted-foreground">
+                            <span>{formatStatus(entry.status)} — {entry.note}</span>
+                            <span>{entry.created_at ? new Date(entry.created_at).toLocaleString() : ""}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>

@@ -11,3 +11,5 @@ export const updateCustomer = (id, data) => api.put(`/customers/${id}`, data);
 export const blockCustomer = (id) => api.put(`/customers/${id}/block`);
 
 export const deleteCustomer = (id) => api.delete(`/customers/${id}`);
+
+export const getCustomerAnalytics = () => api.get("/customers/analytics");

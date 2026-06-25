@@ -5,6 +5,61 @@ import { recordCouponUsage } from "./couponController.js";
 import { getStoreId } from "../helpers/storeHelper.js";
 import logger from "../config/logger.js";
 
+// @desc    Get order statistics for admin dashboard
+// @route   GET /api/orders/stats
+export const getOrderStats = async (req, res) => {
+  try {
+    const storeId = getStoreId(req);
+
+    const statusRows = await query(
+      `SELECT order_status, COUNT(*) as count
+       FROM orders WHERE store_id = ?
+       GROUP BY order_status`,
+      [storeId]
+    );
+
+    const paymentRows = await query(
+      `SELECT payment_status, COUNT(*) as count
+       FROM orders WHERE store_id = ?
+       GROUP BY payment_status`,
+      [storeId]
+    );
+
+    const totalsRows = await query(
+      `SELECT
+        COUNT(*) as total_orders,
+        COALESCE(SUM(total_amount), 0) as total_revenue,
+        COALESCE(SUM(CASE WHEN DATE(created_at) = CURDATE() THEN 1 ELSE 0 END), 0) as today_orders,
+        COALESCE(SUM(CASE WHEN DATE(created_at) = CURDATE() THEN total_amount ELSE 0 END), 0) as today_revenue
+       FROM orders WHERE store_id = ?`,
+      [storeId]
+    );
+    const totals = totalsRows[0];
+
+    const byStatus = {};
+    for (const row of statusRows) {
+      byStatus[row.order_status] = row.count;
+    }
+
+    const byPayment = {};
+    for (const row of paymentRows) {
+      byPayment[row.payment_status] = row.count;
+    }
+
+    return successResponse(res, {
+      total_orders: totals.total_orders,
+      total_revenue: totals.total_revenue,
+      today_orders: totals.today_orders,
+      today_revenue: totals.today_revenue,
+      by_status: byStatus,
+      by_payment: byPayment,
+    });
+  } catch (error) {
+    logger.error("Get order stats error:", error);
+    return errorResponse(res, "Failed to fetch order statistics", 500);
+  }
+};
+
 // @desc    Get all orders
 // @route   GET /api/orders
 export const getOrders = async (req, res) => {
@@ -193,6 +248,13 @@ export const updateOrderStatus = async (req, res) => {
         if (item.product_id) {
           await query("UPDATE products SET total_sales = total_sales + ? WHERE id = ? AND store_id = ?", [item.quantity, item.product_id, storeId]);
         }
+      }
+
+      if (existing[0].customer_id) {
+        await query(
+          "UPDATE customers SET total_spent = total_spent + ? WHERE id = ? AND store_id = ?",
+          [existing[0].total_amount, existing[0].customer_id, storeId]
+        );
       }
     }
 

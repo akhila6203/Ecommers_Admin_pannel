@@ -6,8 +6,11 @@ import {
   removeCartItem,
   clearCart,
 } from "../controllers/cartController.js";
+import { optionalCustomerAuth } from "../middleware/customerAuthMiddleware.js";
 
 const router = express.Router();
+
+router.use(optionalCustomerAuth);
 
 router.get("/", getCart);
 router.post("/", addToCart);

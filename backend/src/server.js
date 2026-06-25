@@ -32,6 +32,9 @@ import mediaRoutes from "./routes/mediaRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import storeRoutes from "./routes/storeRoutes.js";
 import cartRoutes from "./routes/cartRoutes.js";
+import wishlistRoutes from "./routes/wishlistRoutes.js";
+import storefrontAuthRoutes from "./routes/storefrontAuthRoutes.js";
+import storefrontOrderRoutes from "./routes/storefrontOrderRoutes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -118,6 +121,9 @@ app.use("/api/media", mediaRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/stores", storeRoutes);
 app.use("/api/cart", cartRoutes);
+app.use("/api/wishlist", wishlistRoutes);
+app.use("/api/storefront/auth", storefrontAuthRoutes);
+app.use("/api/storefront/orders", storefrontOrderRoutes);
 
 // Health Check
 app.get("/api/health", (req, res) => {

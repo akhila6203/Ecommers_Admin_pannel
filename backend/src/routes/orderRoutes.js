@@ -4,6 +4,7 @@ import { authorize } from "../middleware/roleMiddleware.js";
 import {
   getOrders,
   getOrder,
+  getOrderStats,
   createOrder,
   updateOrderStatus,
   updatePaymentStatus,
@@ -16,6 +17,7 @@ import {
 const router = express.Router();
 
 router.get("/export", authenticate, authorize("super_admin", "admin", "manager"), exportOrders);
+router.get("/stats", authenticate, authorize("super_admin", "admin", "manager", "staff"), getOrderStats);
 router.get("/", authenticate, authorize("super_admin", "admin", "manager", "staff"), getOrders);
 router.get("/:id", authenticate, authorize("super_admin", "admin", "manager", "staff"), getOrder);
 router.post("/", authenticate, authorize("super_admin", "admin", "manager"), createOrder);

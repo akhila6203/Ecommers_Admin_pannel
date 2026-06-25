@@ -34,11 +34,13 @@ export const getCustomers = async (req, res) => {
     const customers = await query(
       `SELECT c.*,
         (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND store_id = ?) as order_count,
-        (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE customer_id = c.id AND store_id = ?) as total_spent_amount
+        (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE customer_id = c.id AND store_id = ? AND order_status != 'cancelled') as total_spent_amount,
+        (SELECT COUNT(*) FROM cart WHERE customer_id = c.id AND store_id = ?) as cart_count,
+        (SELECT COUNT(*) FROM wishlists WHERE customer_id = c.id AND store_id = ?) as wishlist_count
        FROM customers c ${whereClause}
        ORDER BY ${sortColumn} ${sortOrder}
        LIMIT ? OFFSET ?`,
-      [storeId, storeId, ...params, String(limit), String(offset)]
+      [storeId, storeId, storeId, storeId, ...params, String(limit), String(offset)]
     );
 
     return paginatedResponse(res, customers, total, page, limit);
@@ -58,6 +60,31 @@ export const getCustomer = async (req, res) => {
     customer.addresses = await query("SELECT * FROM customer_addresses WHERE customer_id = ? AND store_id = ?", [customer.id, storeId]);
     customer.orders = await query("SELECT id, order_number, total_amount, order_status, payment_status, created_at FROM orders WHERE customer_id = ? AND store_id = ? ORDER BY created_at DESC", [customer.id, storeId]);
     customer.reviews = await query("SELECT r.*, p.name as product_name FROM reviews r JOIN products p ON r.product_id = p.id AND p.store_id = r.store_id WHERE r.customer_id = ? AND r.store_id = ? ORDER BY r.created_at DESC", [customer.id, storeId]);
+
+    customer.cart_items = await query(
+      `SELECT c.id, c.product_id, c.quantity, c.selected_size, c.selected_color, c.item_price, c.created_at,
+              p.name AS product_name, p.thumbnail, p.price, p.offer_price
+       FROM cart c
+       JOIN products p ON p.id = c.product_id AND p.store_id = c.store_id
+       WHERE c.customer_id = ? AND c.store_id = ?
+       ORDER BY c.updated_at DESC`,
+      [customer.id, storeId]
+    );
+
+    customer.wishlist_items = await query(
+      `SELECT w.id, w.product_id, w.created_at,
+              p.name AS product_name, p.thumbnail, p.price, p.offer_price
+       FROM wishlists w
+       JOIN products p ON p.id = w.product_id AND p.store_id = w.store_id
+       WHERE w.customer_id = ? AND w.store_id = ?
+       ORDER BY w.created_at DESC`,
+      [customer.id, storeId]
+    );
+
+    const cartCountRows = await query("SELECT COUNT(*) as count FROM cart WHERE customer_id = ? AND store_id = ?", [customer.id, storeId]);
+    const wishlistCountRows = await query("SELECT COUNT(*) as count FROM wishlists WHERE customer_id = ? AND store_id = ?", [customer.id, storeId]);
+    customer.cart_count = cartCountRows[0].count;
+    customer.wishlist_count = wishlistCountRows[0].count;
 
     return successResponse(res, customer);
   } catch (error) {

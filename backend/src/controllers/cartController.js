@@ -1,11 +1,9 @@
 import { query } from "../config/db.js";
 import { successResponse, errorResponse } from "../helpers/responseHelper.js";
-import { getStoreId } from "../helpers/storeHelper.js";
-
-const getSessionId = (req) =>
-  req.headers["x-cart-session-id"] ||
-  req.body.session_id ||
-  req.query.session_id;
+import {
+  resolveCartScope,
+  cartWhereClause,
+} from "../helpers/cartHelper.js";
 
 const safeJsonParse = (value, fallback = {}) => {
   try {
@@ -17,14 +15,24 @@ const safeJsonParse = (value, fallback = {}) => {
   }
 };
 
+const requireCartScope = (req, res) => {
+  const scope = resolveCartScope(req);
+  const where = cartWhereClause(scope);
+
+  if (!where) {
+    errorResponse(res, "Cart session id or login required", 400);
+    return null;
+  }
+
+  return { scope, where };
+};
+
 export const getCart = async (req, res) => {
   try {
-    const storeId = getStoreId(req);
-    const sessionId = getSessionId(req);
+    const ctx = requireCartScope(req, res);
+    if (!ctx) return;
 
-    if (!sessionId) {
-      return errorResponse(res, "Cart session id required", 400);
-    }
+    const { where } = ctx;
 
     const rows = await query(
       `SELECT 
@@ -41,17 +49,19 @@ export const getCart = async (req, res) => {
         p.price,
         p.offer_price,
         p.thumbnail,
-        p.fabric,
-        p.material,
-        p.stock
+        p.stock,
+        pv.fabric AS variant_fabric,
+        pv.color AS variant_color,
+        pv.size AS variant_size
       FROM cart c
       INNER JOIN products p 
         ON p.id = c.product_id 
        AND p.store_id = c.store_id
-      WHERE c.store_id = ? 
-        AND c.session_id = ?
+      LEFT JOIN product_variants pv
+        ON pv.id = c.variant_id AND pv.store_id = c.store_id
+      WHERE ${where.clause}
       ORDER BY c.updated_at DESC`,
-      [storeId, sessionId]
+      where.params
     );
 
     const cart = rows.map((row) => {
@@ -60,27 +70,19 @@ export const getCart = async (req, res) => {
       return {
         cartItemId: String(row.cart_id),
         cart_id: row.cart_id,
-
         id: row.product_id,
         product_id: row.product_id,
         variant_id: row.variant_id,
-
         slug: row.slug,
         name: row.name,
-
         qty: Number(row.qty || 1),
-        size: row.size || itemData.selected_size || "Free Size",
-        color: row.color || itemData.selected_color || "",
-
+        size: row.size || itemData.selected_size || row.variant_size || "Free Size",
+        color: row.color || itemData.selected_color || row.variant_color || "",
         price: Number(row.offer_price || row.price || row.item_price || 0),
         oldPrice: Number(row.price || 0),
-
         image: row.thumbnail,
-
-        fabric: row.fabric || "",
-        material: row.material || "",
+        fabric: row.variant_fabric || itemData.fabric || "",
         stock: Number(row.stock || 0),
-
         sizes: Array.isArray(itemData.sizes) ? itemData.sizes : [],
         colors: Array.isArray(itemData.colors) ? itemData.colors : [],
       };
@@ -95,12 +97,11 @@ export const getCart = async (req, res) => {
 
 export const addToCart = async (req, res) => {
   try {
-    const storeId = getStoreId(req);
-    const sessionId = getSessionId(req);
+    const ctx = requireCartScope(req, res);
+    if (!ctx) return;
 
-    if (!sessionId) {
-      return errorResponse(res, "Cart session id required", 400);
-    }
+    const { scope, where } = ctx;
+    const { storeId, customerId, sessionId } = scope;
 
     const {
       product_id,
@@ -119,7 +120,7 @@ export const addToCart = async (req, res) => {
     const productRows = await query(
       `SELECT id, price, offer_price, stock 
        FROM products 
-       WHERE id = ? AND store_id = ?`,
+       WHERE id = ? AND store_id = ? AND status = 'active'`,
       [product_id, storeId]
     );
 
@@ -144,16 +145,14 @@ export const addToCart = async (req, res) => {
     const existing = await query(
       `SELECT id, quantity 
        FROM cart
-       WHERE store_id = ?
-         AND session_id = ?
+       WHERE ${where.clause}
          AND product_id = ?
          AND COALESCE(variant_id, 0) = COALESCE(?, 0)
          AND COALESCE(selected_size, '') = COALESCE(?, '')
          AND COALESCE(selected_color, '') = COALESCE(?, '')
        LIMIT 1`,
       [
-        storeId,
-        sessionId,
+        ...where.params,
         product_id,
         variant_id || null,
         selected_size || null,
@@ -168,19 +167,18 @@ export const addToCart = async (req, res) => {
              item_price = ?,
              item_data = COALESCE(?, item_data),
              updated_at = NOW()
-         WHERE id = ? 
-           AND store_id = ? 
-           AND session_id = ?`,
-        [qty, finalPrice, jsonData, existing[0].id, storeId, sessionId]
+         WHERE id = ? AND store_id = ?`,
+        [qty, finalPrice, jsonData, existing[0].id, storeId]
       );
     } else {
       await query(
         `INSERT INTO cart
-          (store_id, session_id, product_id, variant_id, quantity, selected_size, selected_color, item_price, item_data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (store_id, customer_id, session_id, product_id, variant_id, quantity, selected_size, selected_color, item_price, item_data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           storeId,
-          sessionId,
+          customerId || null,
+          customerId ? null : sessionId,
           product_id,
           variant_id || null,
           qty,
@@ -201,13 +199,11 @@ export const addToCart = async (req, res) => {
 
 export const updateCartItem = async (req, res) => {
   try {
-    const storeId = getStoreId(req);
-    const sessionId = getSessionId(req);
-    const cartId = req.params.id;
+    const ctx = requireCartScope(req, res);
+    if (!ctx) return;
 
-    if (!sessionId) {
-      return errorResponse(res, "Cart session id required", 400);
-    }
+    const { where } = ctx;
+    const cartId = req.params.id;
 
     if (!cartId) {
       return errorResponse(res, "Cart item id required", 400);
@@ -242,10 +238,8 @@ export const updateCartItem = async (req, res) => {
     const result = await query(
       `UPDATE cart 
        SET ${fields.join(", ")}
-       WHERE id = ? 
-         AND store_id = ? 
-         AND session_id = ?`,
-      [...values, cartId, storeId, sessionId]
+       WHERE id = ? AND ${where.clause}`,
+      [...values, cartId, ...where.params]
     );
 
     if (result?.affectedRows === 0) {
@@ -261,24 +255,19 @@ export const updateCartItem = async (req, res) => {
 
 export const removeCartItem = async (req, res) => {
   try {
-    const storeId = getStoreId(req);
-    const sessionId = getSessionId(req);
-    const cartId = req.params.id;
+    const ctx = requireCartScope(req, res);
+    if (!ctx) return;
 
-    if (!sessionId) {
-      return errorResponse(res, "Cart session id required", 400);
-    }
+    const { where } = ctx;
+    const cartId = req.params.id;
 
     if (!cartId) {
       return errorResponse(res, "Cart item id required", 400);
     }
 
     const result = await query(
-      `DELETE FROM cart 
-       WHERE id = ? 
-         AND store_id = ? 
-         AND session_id = ?`,
-      [cartId, storeId, sessionId]
+      `DELETE FROM cart WHERE id = ? AND ${where.clause}`,
+      [cartId, ...where.params]
     );
 
     if (result?.affectedRows === 0) {
@@ -294,19 +283,12 @@ export const removeCartItem = async (req, res) => {
 
 export const clearCart = async (req, res) => {
   try {
-    const storeId = getStoreId(req);
-    const sessionId = getSessionId(req);
+    const ctx = requireCartScope(req, res);
+    if (!ctx) return;
 
-    if (!sessionId) {
-      return errorResponse(res, "Cart session id required", 400);
-    }
+    const { where } = ctx;
 
-    await query(
-      `DELETE FROM cart 
-       WHERE store_id = ? 
-         AND session_id = ?`,
-      [storeId, sessionId]
-    );
+    await query(`DELETE FROM cart WHERE ${where.clause}`, where.params);
 
     return successResponse(res, null, "Cart cleared");
   } catch (error) {
