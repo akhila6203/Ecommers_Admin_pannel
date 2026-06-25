@@ -18,7 +18,7 @@ const calculateDiscount = (coupon, orderAmount) => {
 };
 
 const fetchCartItemsForCheckout = async (scope) => {
-  const where = cartWhereClause(scope);
+  const where = cartWhereClause(scope, "c");
   if (!where) return [];
 
   return query(
@@ -84,7 +84,13 @@ export const checkout = async (req, res) => {
       billing_pincode,
       billing_country,
       payment_method,
+      coupon_id,
       coupon_code,
+      discount_amount: clientDiscountAmount,
+      subtotal: clientSubtotal,
+      shipping_charge: clientShippingCharge,
+      tax_amount: clientTaxAmount,
+      total_amount: clientTotalAmount,
       notes,
       shipping_charge = 0,
     } = req.body;
@@ -142,16 +148,26 @@ export const checkout = async (req, res) => {
 
     let discountAmount = 0;
     let appliedCouponCode = null;
+    let appliedCouponId = null;
 
-    if (coupon_code) {
-      const [coupons] = await connection.query(
-        `SELECT id, code, type, value, minimum_order_amount, maximum_discount, usage_limit, used_count, status
+    const couponLookupCode = coupon_code?.trim();
+    if (couponLookupCode || coupon_id) {
+      let couponQuery = `SELECT id, code, type, value, minimum_order_amount, maximum_discount, usage_limit, used_count, status
          FROM coupons
-         WHERE store_id = ? AND code = ? AND status = 'active'
+         WHERE store_id = ? AND status = 'active'
            AND (expiry_date IS NULL OR expiry_date >= CURDATE())
-           AND (start_date IS NULL OR start_date <= CURDATE())`,
-        [storeId, coupon_code.toUpperCase()]
-      );
+           AND (start_date IS NULL OR start_date <= CURDATE())`;
+      const couponParams = [storeId];
+
+      if (coupon_id) {
+        couponQuery += " AND id = ?";
+        couponParams.push(coupon_id);
+      } else {
+        couponQuery += " AND code = ?";
+        couponParams.push(couponLookupCode.toUpperCase());
+      }
+
+      const [coupons] = await connection.query(couponQuery, couponParams);
 
       if (!coupons.length) {
         return errorResponse(res, "Invalid or expired coupon", 400);
@@ -167,11 +183,16 @@ export const checkout = async (req, res) => {
 
       discountAmount = calculateDiscount(coupon, subtotal);
       appliedCouponCode = coupon.code;
+      appliedCouponId = coupon.id;
     }
 
-    const shippingCharge = Number(shipping_charge) || 0;
-    const taxAmount = 0;
-    const totalAmount = Math.max(0, subtotal - discountAmount + shippingCharge + taxAmount);
+    const shippingCharge = Number(clientShippingCharge ?? shipping_charge) || 0;
+    const taxAmount = Number(clientTaxAmount) || 0;
+    const totalAmount = Math.max(
+      0,
+      Number(clientTotalAmount) ||
+        subtotal - discountAmount + shippingCharge + taxAmount
+    );
     const orderNumber = generateOrderNumber();
     const payMethod = payment_method || "cod";
 
@@ -183,8 +204,8 @@ export const checkout = async (req, res) => {
          shipping_name, shipping_phone, shipping_address, shipping_city, shipping_state, shipping_pincode, shipping_country,
          billing_name, billing_phone, billing_address, billing_city, billing_state, billing_pincode, billing_country,
          subtotal, discount_amount, shipping_charge, tax_amount, total_amount,
-         payment_method, payment_status, coupon_code, notes, is_cod, is_paid)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         payment_method, payment_status, order_status, coupon_id, coupon_code, notes, is_cod, is_paid)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         storeId,
         orderNumber,
@@ -205,13 +226,15 @@ export const checkout = async (req, res) => {
         billing_state || shipping_state,
         billing_pincode || shipping_pincode,
         billing_country || shipping_country || "India",
-        subtotal,
+        clientSubtotal != null && !isNaN(clientSubtotal) ? parseFloat(clientSubtotal) : subtotal,
         discountAmount,
         shippingCharge,
         taxAmount,
         totalAmount,
         payMethod,
         payMethod === "cod" ? "pending" : "pending",
+        "pending",
+        appliedCouponId,
         appliedCouponCode,
         notes || null,
         payMethod === "cod" ? 1 : 0,
@@ -249,24 +272,38 @@ export const checkout = async (req, res) => {
         "UPDATE products SET stock = stock - ? WHERE id = ? AND store_id = ?",
         [item.quantity, item.product_id, storeId]
       );
-      await connection.query(
-        "UPDATE inventory SET quantity = quantity - ?, available_quantity = available_quantity - ? WHERE product_id = ? AND store_id = ?",
-        [item.quantity, item.quantity, item.product_id, storeId]
-      );
+      try {
+        await connection.query(
+          "UPDATE inventory SET quantity = quantity - ?, available_quantity = available_quantity - ? WHERE product_id = ? AND store_id = ?",
+          [item.quantity, item.quantity, item.product_id, storeId]
+        );
+      } catch (inventoryError) {
+        logger.warn("Inventory update skipped:", inventoryError.message);
+      }
       if (item.variant_id) {
         await connection.query(
           "UPDATE product_variants SET stock = GREATEST(stock - ?, 0) WHERE id = ? AND store_id = ?",
           [item.quantity, item.variant_id, storeId]
         );
       }
-      await connection.query(
-        "INSERT INTO inventory_logs (store_id, product_id, type, quantity, reference_type, reference_id, notes) VALUES (?, ?, 'sale', ?, 'order', ?, ?)",
-        [storeId, item.product_id, -item.quantity, orderId, `Order #${orderNumber}`]
-      );
+      try {
+        await connection.query(
+          "INSERT INTO inventory_logs (store_id, product_id, type, quantity, reference_type, reference_id, notes) VALUES (?, ?, 'sale', ?, 'order', ?, ?)",
+          [storeId, item.product_id, -item.quantity, orderId, `Order #${orderNumber}`]
+        );
+      } catch (logError) {
+        logger.warn("Inventory log skipped:", logError.message);
+      }
     }
 
     await connection.query(
-      "INSERT INTO order_timeline (store_id, order_id, status, note, created_by) VALUES (?, ?, 'pending', 'Order placed from website', NULL)",
+      "INSERT INTO order_timeline (store_id, order_id, status, note, created_by) VALUES (?, ?, 'pending', 'Order placed successfully', NULL)",
+      [storeId, orderId]
+    );
+
+    await connection.query(
+      `INSERT INTO order_notes (store_id, order_id, note, note_type, is_visible_to_customer)
+       VALUES (?, ?, 'Customer placed order', 'system', 1)`,
       [storeId, orderId]
     );
 
@@ -284,21 +321,58 @@ export const checkout = async (req, res) => {
     await connection.query(`DELETE FROM cart WHERE ${cartWhere.clause}`, cartWhere.params);
 
     await connection.query(
-      "UPDATE customers SET total_orders = total_orders + 1 WHERE id = ? AND store_id = ?",
-      [customerId, storeId]
+      "UPDATE customers SET total_orders = total_orders + 1, total_spent = total_spent + ? WHERE id = ? AND store_id = ?",
+      [totalAmount, customerId, storeId]
     );
 
     await connection.commit();
 
     const orders = await query("SELECT * FROM orders WHERE id = ? AND store_id = ?", [orderId, storeId]);
-    const order = orders[0];
-    order.items = orderItems;
+    const savedOrder = orders[0];
+    const savedItems = await query(
+      "SELECT * FROM order_items WHERE order_id = ? AND store_id = ?",
+      [orderId, storeId]
+    );
 
-    return successResponse(res, order, "Order placed successfully", 201);
+    return successResponse(
+      res,
+      {
+        order: {
+          id: savedOrder.id,
+          order_number: savedOrder.order_number,
+          total_amount: savedOrder.total_amount,
+          subtotal: savedOrder.subtotal,
+          discount_amount: savedOrder.discount_amount,
+          shipping_charge: savedOrder.shipping_charge,
+          tax_amount: savedOrder.tax_amount,
+          payment_method: savedOrder.payment_method,
+          order_status: savedOrder.order_status,
+          shipping_name: savedOrder.shipping_name,
+          shipping_phone: savedOrder.shipping_phone,
+          shipping_address: savedOrder.shipping_address,
+          shipping_city: savedOrder.shipping_city,
+          shipping_state: savedOrder.shipping_state,
+          shipping_pincode: savedOrder.shipping_pincode,
+          shipping_country: savedOrder.shipping_country,
+          created_at: savedOrder.created_at,
+        },
+        items: savedItems,
+      },
+      "Order placed successfully",
+      201
+    );
   } catch (error) {
-    await connection.rollback();
+    try {
+      await connection.rollback();
+    } catch {
+      // ignore rollback errors
+    }
     logger.error("Checkout error:", error);
-    return errorResponse(res, "Failed to place order", 500);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to place order",
+      500
+    );
   } finally {
     connection.release();
   }

@@ -19,7 +19,8 @@ const storage = multer.diskStorage({
     else if (type === "media") uploadPath = path.join(uploadPath, "media");
     else if (type === "content") uploadPath = path.join(uploadPath, "content");
     else if (type === "collections") uploadPath = path.join(uploadPath, "collections");
-    else if (type === "admins" || type === "auth") uploadPath = path.join(uploadPath, "admins");
+    else if (type === "admins") uploadPath = path.join(uploadPath, "admins");
+    else if (type === "auth") uploadPath = path.join(uploadPath, "customers");
 
     if (!fs.existsSync(uploadPath)) {
       fs.mkdirSync(uploadPath, { recursive: true });

@@ -6,8 +6,10 @@ import { getStoreId } from "../helpers/storeHelper.js";
 import { getSessionId, mergeSessionCartToCustomer } from "../helpers/cartHelper.js";
 import logger from "../config/logger.js";
 
+
+
 const customerFields =
-  "id, store_id, first_name, last_name, email, phone, avatar, gender, date_of_birth, status, total_orders, total_spent, address_line1, address_line2, city, state, pincode, country, created_at, last_login_at";
+  "id, store_id, first_name, last_name, email, phone, avatar, gender, date_of_birth, status, total_orders, total_spent, created_at, last_login_at";
 
 const buildCustomerPayload = (customer) => ({
   id: customer.id,
@@ -22,14 +24,6 @@ const buildCustomerPayload = (customer) => ({
   status: customer.status,
   total_orders: customer.total_orders,
   total_spent: customer.total_spent,
-  address: {
-    address_line1: customer.address_line1,
-    address_line2: customer.address_line2,
-    city: customer.city,
-    state: customer.state,
-    pincode: customer.pincode,
-    country: customer.country,
-  },
   created_at: customer.created_at,
   last_login_at: customer.last_login_at,
 });
@@ -58,24 +52,10 @@ const issueTokens = async (customer) => {
 export const register = async (req, res) => {
   try {
     const storeId = getStoreId(req);
-    const {
-      first_name,
-      last_name,
-      email,
-      password,
-      phone,
-      gender,
-      date_of_birth,
-      address_line1,
-      address_line2,
-      city,
-      state,
-      pincode,
-      country,
-    } = req.body;
+    const { first_name, last_name, email, phone, password } = req.body;
 
-    if (!first_name?.trim() || !last_name?.trim() || !email?.trim() || !password) {
-      return errorResponse(res, "First name, last name, email and password are required", 400);
+    if (!first_name?.trim() || !last_name?.trim() || !email?.trim() || !phone?.trim() || !password) {
+      return errorResponse(res, "First name, last name, email, phone and password are required", 400);
     }
 
     const existing = await query(
@@ -89,24 +69,15 @@ export const register = async (req, res) => {
     const hashedPassword = await hashPassword(password);
     const result = await query(
       `INSERT INTO customers
-        (store_id, first_name, last_name, email, password, phone, gender, date_of_birth,
-         address_line1, address_line2, city, state, pincode, country, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+        (store_id, first_name, last_name, email, phone, password)
+       VALUES (?, ?, ?, ?, ?, ?)`,
       [
         storeId,
         first_name.trim(),
         last_name.trim(),
         email.trim().toLowerCase(),
+        phone.trim(),
         hashedPassword,
-        phone || null,
-        gender || null,
-        date_of_birth || null,
-        address_line1 || null,
-        address_line2 || null,
-        city || null,
-        state || null,
-        pincode || null,
-        country || "India",
       ]
     );
 
@@ -118,20 +89,28 @@ export const register = async (req, res) => {
 
     const sessionId = getSessionId(req);
     if (sessionId) {
-      await mergeSessionCartToCustomer(storeId, sessionId, customer.id);
+      try {
+        await mergeSessionCartToCustomer(storeId, sessionId, customer.id);
+      } catch (mergeError) {
+        logger.error("Cart merge after register failed:", mergeError);
+      }
     }
 
     const { token, refreshToken } = await issueTokens(customer);
 
-    return successResponse(
-      res,
-      { customer: buildCustomerPayload(customer), token, refreshToken },
-      "Registration successful",
-      201
-    );
+    return res.status(201).json({
+      success: true,
+      customer: buildCustomerPayload(customer),
+      token,
+      refreshToken,
+    });
   } catch (error) {
     logger.error("Customer register error:", error);
-    return errorResponse(res, "Registration failed", 500);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Registration failed",
+      500
+    );
   }
 };
 
@@ -146,8 +125,7 @@ export const login = async (req, res) => {
 
     const customers = await query(
       `SELECT id, store_id, first_name, last_name, email, password, phone, avatar, gender,
-              date_of_birth, status, total_orders, total_spent,
-              address_line1, address_line2, city, state, pincode, country, created_at, last_login_at
+              date_of_birth, status, total_orders, total_spent, created_at, last_login_at
        FROM customers WHERE email = ? AND store_id = ?`,
       [email.trim().toLowerCase(), storeId]
     );
@@ -175,10 +153,19 @@ export const login = async (req, res) => {
       [customer.id, storeId]
     );
 
+    // const sessionId = getSessionId(req);
+    // if (sessionId) {
+    //   await mergeSessionCartToCustomer(storeId, sessionId, customer.id);
+    // }
     const sessionId = getSessionId(req);
-    if (sessionId) {
-      await mergeSessionCartToCustomer(storeId, sessionId, customer.id);
-    }
+
+if (sessionId) {
+  try {
+    await mergeSessionCartToCustomer(storeId, sessionId, customer.id);
+  } catch (mergeError) {
+    logger.error("Cart merge after login failed:", mergeError);
+  }
+}
 
     await query(
       "UPDATE refresh_tokens SET revoked_at = NOW() WHERE customer_id = ? AND revoked_at IS NULL",
@@ -223,48 +210,64 @@ export const getProfile = async (req, res) => {
     if (!customers.length) return errorResponse(res, "Customer not found", 404);
 
     const customer = customers[0];
-    customer.addresses = await query(
-      "SELECT * FROM customer_addresses WHERE customer_id = ? AND store_id = ? ORDER BY is_default DESC, created_at DESC",
-      [customer.id, storeId]
-    );
+    try {
+      customer.addresses = await query(
+        "SELECT * FROM customer_addresses WHERE customer_id = ? AND store_id = ? ORDER BY is_default DESC, created_at DESC",
+        [customer.id, storeId]
+      );
+    } catch (addressError) {
+      logger.warn("Profile addresses skipped:", addressError.message);
+      customer.addresses = [];
+    }
 
-    const cartCountRows = await query(
-      "SELECT COUNT(*) as count FROM cart WHERE customer_id = ? AND store_id = ?",
-      [customer.id, storeId]
-    );
-    const wishlistCountRows = await query(
-      "SELECT COUNT(*) as count FROM wishlists WHERE customer_id = ? AND store_id = ?",
-      [customer.id, storeId]
-    );
+    let cartCount = 0;
+    let wishlistCount = 0;
+
+    try {
+      const cartCountRows = await query(
+        "SELECT COUNT(*) as count FROM cart WHERE customer_id = ? AND store_id = ?",
+        [customer.id, storeId]
+      );
+      cartCount = cartCountRows[0]?.count ?? 0;
+    } catch (cartError) {
+      logger.warn("Profile cart count skipped:", cartError.message);
+    }
+
+    try {
+      const wishlistCountRows = await query(
+        "SELECT COUNT(*) as count FROM wishlists WHERE customer_id = ? AND store_id = ?",
+        [customer.id, storeId]
+      );
+      wishlistCount = wishlistCountRows[0]?.count ?? 0;
+    } catch (wishlistError) {
+      logger.warn("Profile wishlist count skipped:", wishlistError.message);
+    }
 
     return successResponse(res, {
       ...buildCustomerPayload(customer),
       addresses: customer.addresses,
-      cart_count: cartCountRows[0].count,
-      wishlist_count: wishlistCountRows[0].count,
+      cart_count: cartCount,
+      wishlist_count: wishlistCount,
     });
   } catch (error) {
     logger.error("Get customer profile error:", error);
-    return errorResponse(res, "Failed to fetch profile", 500);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to fetch profile",
+      500
+    );
   }
 };
 
 export const updateProfile = async (req, res) => {
   try {
     const storeId = getStoreId(req);
-    const {
-      first_name,
-      last_name,
-      phone,
-      gender,
-      date_of_birth,
-      address_line1,
-      address_line2,
-      city,
-      state,
-      pincode,
-      country,
-    } = req.body;
+    const { first_name, last_name, phone, gender, date_of_birth } = req.body;
+
+    let avatarPath = null;
+    if (req.file) {
+      avatarPath = `uploads/customers/${req.file.filename}`;
+    }
 
     await query(
       `UPDATE customers SET
@@ -273,25 +276,15 @@ export const updateProfile = async (req, res) => {
         phone = COALESCE(?, phone),
         gender = COALESCE(?, gender),
         date_of_birth = COALESCE(?, date_of_birth),
-        address_line1 = COALESCE(?, address_line1),
-        address_line2 = COALESCE(?, address_line2),
-        city = COALESCE(?, city),
-        state = COALESCE(?, state),
-        pincode = COALESCE(?, pincode),
-        country = COALESCE(?, country)
+        avatar = COALESCE(?, avatar)
        WHERE id = ? AND store_id = ?`,
       [
-        first_name,
-        last_name,
-        phone,
-        gender,
-        date_of_birth,
-        address_line1,
-        address_line2,
-        city,
-        state,
-        pincode,
-        country,
+        first_name || null,
+        last_name || null,
+        phone || null,
+        gender || null,
+        date_of_birth || null,
+        avatarPath,
         req.customer.id,
         storeId,
       ]
@@ -302,9 +295,247 @@ export const updateProfile = async (req, res) => {
       [req.customer.id, storeId]
     );
 
-    return successResponse(res, buildCustomerPayload(customers[0]), "Profile updated");
+    const customer = customers[0];
+    customer.addresses = await query(
+      "SELECT * FROM customer_addresses WHERE customer_id = ? AND store_id = ? ORDER BY is_default DESC, created_at DESC",
+      [customer.id, storeId]
+    );
+
+    return successResponse(res, buildCustomerPayload(customer), "Profile updated");
   } catch (error) {
     logger.error("Update customer profile error:", error);
-    return errorResponse(res, "Failed to update profile", 500);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to update profile",
+      500
+    );
+  }
+};
+
+const ADDRESS_FIELDS =
+  "id, store_id, customer_id, address_type, full_name, phone, address_line1, address_line2, city, state, pincode, country, is_default, created_at, updated_at";
+
+const normalizeAddressBody = (body) => ({
+  address_type: body.address_type || "shipping",
+  full_name: body.full_name?.trim(),
+  phone: body.phone?.trim(),
+  address_line1: body.address_line1?.trim(),
+  address_line2: body.address_line2?.trim() || null,
+  city: body.city?.trim(),
+  state: body.state?.trim(),
+  pincode: body.pincode?.trim(),
+  country: body.country?.trim() || "India",
+  is_default: body.is_default ? 1 : 0,
+});
+
+const validateAddressPayload = (payload) => {
+  if (!payload.full_name) return "Full name is required";
+  if (!payload.phone) return "Phone is required";
+  if (!payload.address_line1) return "Address line 1 is required";
+  if (!payload.city) return "City is required";
+  if (!payload.state) return "State is required";
+  if (!payload.pincode) return "Pincode is required";
+  return null;
+};
+
+const clearDefaultAddresses = async (customerId, storeId, exceptId = null) => {
+  const params = [customerId, storeId];
+  let sql =
+    "UPDATE customer_addresses SET is_default = 0 WHERE customer_id = ? AND store_id = ?";
+  if (exceptId) {
+    sql += " AND id != ?";
+    params.push(exceptId);
+  }
+  await query(sql, params);
+};
+
+export const getAddresses = async (req, res) => {
+  try {
+    const storeId = getStoreId(req);
+    const customerId = req.customer.id;
+
+    const rows = await query(
+      `SELECT ${ADDRESS_FIELDS} FROM customer_addresses
+       WHERE store_id = ? AND customer_id = ?
+       ORDER BY is_default DESC, created_at DESC`,
+      [storeId, customerId]
+    );
+
+    return successResponse(res, rows, "Addresses fetched successfully");
+  } catch (error) {
+    logger.error("Get addresses error:", error);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to fetch addresses",
+      500
+    );
+  }
+};
+
+export const createAddress = async (req, res) => {
+  try {
+    const storeId = getStoreId(req);
+    const customerId = req.customer.id;
+    const payload = normalizeAddressBody(req.body);
+    const validationError = validateAddressPayload(payload);
+    if (validationError) return errorResponse(res, validationError, 400);
+
+    if (payload.is_default) {
+      await clearDefaultAddresses(customerId, storeId);
+    }
+
+    const result = await query(
+      `INSERT INTO customer_addresses
+        (store_id, customer_id, address_type, full_name, phone, address_line1, address_line2, city, state, pincode, country, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        storeId,
+        customerId,
+        payload.address_type,
+        payload.full_name,
+        payload.phone,
+        payload.address_line1,
+        payload.address_line2,
+        payload.city,
+        payload.state,
+        payload.pincode,
+        payload.country,
+        payload.is_default,
+      ]
+    );
+
+    const rows = await query(
+      `SELECT ${ADDRESS_FIELDS} FROM customer_addresses WHERE id = ? AND store_id = ? AND customer_id = ?`,
+      [result.insertId, storeId, customerId]
+    );
+
+    return successResponse(res, rows[0], "Address added successfully", 201);
+  } catch (error) {
+    logger.error("Create address error:", error);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to add address",
+      500
+    );
+  }
+};
+
+export const updateAddress = async (req, res) => {
+  try {
+    const storeId = getStoreId(req);
+    const customerId = req.customer.id;
+    const addressId = req.params.id;
+
+    const existing = await query(
+      "SELECT id FROM customer_addresses WHERE id = ? AND store_id = ? AND customer_id = ?",
+      [addressId, storeId, customerId]
+    );
+    if (!existing.length) return errorResponse(res, "Address not found", 404);
+
+    const payload = normalizeAddressBody(req.body);
+    const validationError = validateAddressPayload(payload);
+    if (validationError) return errorResponse(res, validationError, 400);
+
+    if (payload.is_default) {
+      await clearDefaultAddresses(customerId, storeId, addressId);
+    }
+
+    await query(
+      `UPDATE customer_addresses SET
+        address_type = ?, full_name = ?, phone = ?, address_line1 = ?, address_line2 = ?,
+        city = ?, state = ?, pincode = ?, country = ?, is_default = ?
+       WHERE id = ? AND store_id = ? AND customer_id = ?`,
+      [
+        payload.address_type,
+        payload.full_name,
+        payload.phone,
+        payload.address_line1,
+        payload.address_line2,
+        payload.city,
+        payload.state,
+        payload.pincode,
+        payload.country,
+        payload.is_default,
+        addressId,
+        storeId,
+        customerId,
+      ]
+    );
+
+    const rows = await query(
+      `SELECT ${ADDRESS_FIELDS} FROM customer_addresses WHERE id = ? AND store_id = ? AND customer_id = ?`,
+      [addressId, storeId, customerId]
+    );
+
+    return successResponse(res, rows[0], "Address updated successfully");
+  } catch (error) {
+    logger.error("Update address error:", error);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to update address",
+      500
+    );
+  }
+};
+
+export const deleteAddress = async (req, res) => {
+  try {
+    const storeId = getStoreId(req);
+    const customerId = req.customer.id;
+    const addressId = req.params.id;
+
+    const existing = await query(
+      "SELECT id FROM customer_addresses WHERE id = ? AND store_id = ? AND customer_id = ?",
+      [addressId, storeId, customerId]
+    );
+    if (!existing.length) return errorResponse(res, "Address not found", 404);
+
+    await query(
+      "DELETE FROM customer_addresses WHERE id = ? AND store_id = ? AND customer_id = ?",
+      [addressId, storeId, customerId]
+    );
+
+    return successResponse(res, null, "Address deleted successfully");
+  } catch (error) {
+    logger.error("Delete address error:", error);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to delete address",
+      500
+    );
+  }
+};
+
+export const setDefaultAddress = async (req, res) => {
+  try {
+    const storeId = getStoreId(req);
+    const customerId = req.customer.id;
+    const addressId = req.params.id;
+
+    const existing = await query(
+      "SELECT id FROM customer_addresses WHERE id = ? AND store_id = ? AND customer_id = ?",
+      [addressId, storeId, customerId]
+    );
+    if (!existing.length) return errorResponse(res, "Address not found", 404);
+
+    await clearDefaultAddresses(customerId, storeId);
+    await query(
+      "UPDATE customer_addresses SET is_default = 1 WHERE id = ? AND store_id = ? AND customer_id = ?",
+      [addressId, storeId, customerId]
+    );
+
+    const rows = await query(
+      `SELECT ${ADDRESS_FIELDS} FROM customer_addresses WHERE id = ? AND store_id = ? AND customer_id = ?`,
+      [addressId, storeId, customerId]
+    );
+
+    return successResponse(res, rows[0], "Default address updated");
+  } catch (error) {
+    logger.error("Set default address error:", error);
+    return errorResponse(
+      res,
+      error.sqlMessage || error.message || "Failed to set default address",
+      500
+    );
   }
 };

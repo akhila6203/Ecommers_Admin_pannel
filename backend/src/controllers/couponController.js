@@ -197,11 +197,25 @@ export const validateCoupon = async (req, res) => {
       return errorResponse(res, "Coupon usage limit reached", 400);
     }
 
-    const discountAmount = calculateDiscount(coupon, order_amount);
+    const orderAmount = parseFloat(order_amount) || 0;
+    const discountAmount = Math.min(calculateDiscount(coupon, orderAmount), orderAmount);
+    const finalAmount = Math.max(0, orderAmount - discountAmount);
 
     return successResponse(
       res,
-      { valid: true, coupon: { ...coupon, calculated_discount: discountAmount } },
+      {
+        valid: true,
+        coupon: {
+          id: coupon.id,
+          code: coupon.code,
+          type: coupon.type,
+          value: parseFloat(coupon.value),
+          minimum_order_amount: parseFloat(coupon.minimum_order_amount || 0),
+          maximum_discount: parseFloat(coupon.maximum_discount || 0),
+        },
+        discount_amount: discountAmount,
+        final_amount: finalAmount,
+      },
       "Coupon is valid"
     );
   } catch (error) {

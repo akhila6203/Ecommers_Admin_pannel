@@ -14,16 +14,18 @@ export const resolveCartScope = (req) => {
   return { storeId, customerId, sessionId };
 };
 
-export const cartWhereClause = ({ storeId, customerId, sessionId }) => {
+export const cartWhereClause = ({ storeId, customerId, sessionId }, alias = "cart") => {
+  const col = (name) => `${alias}.${name}`;
+
   if (customerId) {
     return {
-      clause: "c.store_id = ? AND c.customer_id = ?",
+      clause: `${col("store_id")} = ? AND ${col("customer_id")} = ?`,
       params: [storeId, customerId],
     };
   }
   if (sessionId) {
     return {
-      clause: "c.store_id = ? AND c.session_id = ? AND (c.customer_id IS NULL OR c.customer_id = 0)",
+      clause: `${col("store_id")} = ? AND ${col("session_id")} = ? AND (${col("customer_id")} IS NULL OR ${col("customer_id")} = 0)`,
       params: [storeId, sessionId],
     };
   }

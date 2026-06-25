@@ -15,6 +15,12 @@ const safeJsonParse = (value, fallback = {}) => {
   }
 };
 
+const parseSizes = (itemData, row) => {
+  const fromData = Array.isArray(itemData.sizes) ? itemData.sizes : [];
+  const fallback = row.size || row.variant_size || "Free Size";
+  return fromData.length ? fromData : fallback ? [fallback] : ["Free Size"];
+};
+
 const requireCartScope = (req, res) => {
   const scope = resolveCartScope(req);
   const where = cartWhereClause(scope);
@@ -32,7 +38,8 @@ export const getCart = async (req, res) => {
     const ctx = requireCartScope(req, res);
     if (!ctx) return;
 
-    const { where } = ctx;
+    const { scope } = ctx;
+    const where = cartWhereClause(scope, "c");
 
     const rows = await query(
       `SELECT 
@@ -40,6 +47,8 @@ export const getCart = async (req, res) => {
         c.product_id,
         c.variant_id,
         c.quantity AS qty,
+        c.selected_size,
+        c.selected_color,
         c.selected_size AS size,
         c.selected_color AS color,
         c.item_price,
@@ -66,25 +75,37 @@ export const getCart = async (req, res) => {
 
     const cart = rows.map((row) => {
       const itemData = safeJsonParse(row.item_data, {});
+      const selectedSize =
+        row.selected_size || itemData.selected_size || row.variant_size || "Free Size";
+      const selectedColor =
+        row.selected_color || itemData.selected_color || row.variant_color || "";
+      const price = Number(row.offer_price || row.price || row.item_price || 0);
+      const image = itemData.image || row.thumbnail || "";
 
       return {
-        cartItemId: String(row.cart_id),
         cart_id: row.cart_id,
-        id: row.product_id,
+        cartItemId: String(row.cart_id),
         product_id: row.product_id,
         variant_id: row.variant_id,
-        slug: row.slug,
-        name: row.name,
         qty: Number(row.qty || 1),
-        size: row.size || itemData.selected_size || row.variant_size || "Free Size",
-        color: row.color || itemData.selected_color || row.variant_color || "",
-        price: Number(row.offer_price || row.price || row.item_price || 0),
-        oldPrice: Number(row.price || 0),
-        image: row.thumbnail,
+        quantity: Number(row.qty || 1),
+        selected_size: selectedSize,
+        selected_color: selectedColor,
+        size: selectedSize,
+        color: selectedColor,
+        item_price: Number(row.item_price || price || 0),
+        price,
+        name: itemData.name || row.name,
+        slug: itemData.slug || row.slug,
+        thumbnail: row.thumbnail,
+        image,
         fabric: row.variant_fabric || itemData.fabric || "",
+        material: itemData.material || "",
+        brand: itemData.brand || "",
         stock: Number(row.stock || 0),
-        sizes: Array.isArray(itemData.sizes) ? itemData.sizes : [],
+        sizes: parseSizes(itemData, row),
         colors: Array.isArray(itemData.colors) ? itemData.colors : [],
+        item_data: itemData,
       };
     });
 
