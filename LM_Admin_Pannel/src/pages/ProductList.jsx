@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Pencil, Trash2, AlertCircle, Star } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, } from "lucide-react";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { TableSkeleton } from "@/components/PageQueryState";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
-import { getProducts, deleteProduct, toggleFeatured } from "@/services/productService";
+import { getProducts, deleteProduct,} from "@/services/productService";
 import { resolveUploadUrl } from "@/utils/imageUrl";
 
 export default function ProductList() {
@@ -34,16 +34,16 @@ export default function ProductList() {
     },
   });
 
-  const featuredMutation = useMutation({
-    mutationFn: (id) => toggleFeatured(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
-      toast.success("Featured status toggled");
-    },
-    onError: (err) => {
-      toast.error(err.response?.data?.message || err.message || "Failed to toggle featured");
-    },
-  });
+  // const featuredMutation = useMutation({
+  //   mutationFn: (id) => toggleFeatured(id),
+  //   onSuccess: () => {
+  //     queryClient.invalidateQueries({ queryKey: ["products"] });
+  //     toast.success("Featured status toggled");
+  //   },
+  //   onError: (err) => {
+  //     toast.error(err.response?.data?.message || err.message || "Failed to toggle featured");
+  //   },
+  // });
 
   const handleDelete = (id) => {
     if (window.confirm("Delete this product?")) {
@@ -131,21 +131,21 @@ export default function ProductList() {
           { key: "discount_percentage", label: "Disc %", render: (r) => r.discount_percentage ? `${r.discount_percentage}%` : "—" },
           { key: "fabric", label: "Fabric", render: (r) => r.fabric || "—" },
           { key: "stock", label: "Stock" },
-          {
-            key: "is_featured", label: "Featured",
-            render: (r) => (
-              <button
-                onClick={() => featuredMutation.mutate(r.id)}
-                disabled={featuredMutation.isPending}
-                className={`p-1 rounded-md transition ${
-                  r.is_featured ? "text-yellow-500 hover:text-yellow-600" : "text-muted-foreground hover:text-yellow-500"
-                }`}
-                title={r.is_featured ? "Remove from featured" : "Mark as featured"}
-              >
-                <Star className={`w-4 h-4 ${r.is_featured ? "fill-current" : ""}`} />
-              </button>
-            ),
-          },
+          // {
+          //   key: "is_featured", label: "Featured",
+          //   render: (r) => (
+          //     <button
+          //       onClick={() => featuredMutation.mutate(r.id)}
+          //       disabled={featuredMutation.isPending}
+          //       className={`p-1 rounded-md transition ${
+          //         r.is_featured ? "text-yellow-500 hover:text-yellow-600" : "text-muted-foreground hover:text-yellow-500"
+          //       }`}
+          //       title={r.is_featured ? "Remove from featured" : "Mark as featured"}
+          //     >
+          //       <Star className={`w-4 h-4 ${r.is_featured ? "fill-current" : ""}`} />
+          //     </button>
+          //   ),
+          // },
           { key: "status", label: "Status", render: (r) => statusBadge(r.status) },
           {
             key: "actions", label: "Actions",
