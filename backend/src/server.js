@@ -35,6 +35,7 @@ import cartRoutes from "./routes/cartRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
 import storefrontAuthRoutes from "./routes/storefrontAuthRoutes.js";
 import storefrontOrderRoutes from "./routes/storefrontOrderRoutes.js";
+import storefrontPaymentRoutes from "./routes/storefrontPaymentRoutes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -124,6 +125,7 @@ app.use("/api/cart", cartRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/storefront/auth", storefrontAuthRoutes);
 app.use("/api/storefront/orders", storefrontOrderRoutes);
+app.use("/api/storefront/payments", storefrontPaymentRoutes);
 
 // Health Check
 app.get("/api/health", (req, res) => {

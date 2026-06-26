@@ -396,13 +396,32 @@ export const getMyOrders = async (req, res) => {
       `SELECT o.id, o.order_number, o.order_status, o.payment_status, o.payment_method,
               o.total_amount, o.subtotal, o.discount_amount, o.shipping_charge,
               o.created_at, o.delivered_at,
-              (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS items_count
+              (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.store_id = o.store_id) AS items_count,
+              (SELECT oi.image FROM order_items oi WHERE oi.order_id = o.id AND oi.store_id = o.store_id ORDER BY oi.id ASC LIMIT 1) AS first_item_image,
+              (SELECT oi.product_id FROM order_items oi WHERE oi.order_id = o.id AND oi.store_id = o.store_id ORDER BY oi.id ASC LIMIT 1) AS first_product_id,
+              (SELECT p.slug
+               FROM order_items oi
+               JOIN products p ON p.id = oi.product_id AND p.store_id = oi.store_id
+               WHERE oi.order_id = o.id AND oi.store_id = o.store_id
+               ORDER BY oi.id ASC LIMIT 1) AS product_slug
        FROM orders o
        WHERE o.store_id = ? AND o.customer_id = ?
        ORDER BY o.created_at DESC
        LIMIT ? OFFSET ?`,
       [storeId, customerId, String(limit), String(offset)]
     );
+
+    // const orders = await query(
+    //   `SELECT o.id, o.order_number, o.order_status, o.payment_status, o.payment_method,
+    //           o.total_amount, o.subtotal, o.discount_amount, o.shipping_charge,
+    //           o.created_at, o.delivered_at,
+    //           (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS items_count
+    //    FROM orders o
+    //    WHERE o.store_id = ? AND o.customer_id = ?
+    //    ORDER BY o.created_at DESC
+    //    LIMIT ? OFFSET ?`,
+    //   [storeId, customerId, String(limit), String(offset)]
+    // );
 
     return paginatedResponse(res, orders, total, page, limit);
   } catch (error) {
