@@ -119,3 +119,7 @@ INSERT IGNORE INTO content_pages (store_id, page_key, title, content, status) VA
   (1, 'terms-conditions', 'Terms & Conditions', '', 'active'),
   (1, 'shipping-policy', 'Shipping Policy', '', 'active'),
   (1, 'refund-policy', 'Refund Policy', '', 'active');
+
+
+ALTER TABLE integration_settings
+ADD COLUMN shiprocket_pickup_location VARCHAR(255) DEFAULT '';

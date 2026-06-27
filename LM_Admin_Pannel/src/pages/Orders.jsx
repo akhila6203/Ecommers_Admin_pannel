@@ -5,17 +5,21 @@ import { toast } from "sonner";
 import { DataTable } from "@/components/DataTable";
 import PageQueryState, { TableSkeleton } from "@/components/PageQueryState";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
+// import { Label } from "@/components/ui/label";
 import {
   getOrders,
   getOrder,
   getOrderStats,
-  updateOrderStatus,
-  updatePaymentStatus,
-  cancelOrder,
+  // updateOrderStatus,
+  // updatePaymentStatus,
+  // cancelOrder,
+  createShiprocketShipment,
+  syncShiprocketTracking,
+  generateShiprocketLabel,
+  scheduleShiprocketPickup,
 } from "@/services/orderService";
 
-const ORDER_STATUSES = ["pending", "confirmed", "packed", "shipped", "delivered", "cancelled"];
+const ORDER_STATUSES = ["pending", "confirmed", "packed", "shipped", "out_for_delivery", "delivered", "cancelled"];
 const PAYMENT_STATUSES = ["pending", "paid", "failed", "refunded"];
 
 function formatStatus(status) {
@@ -60,8 +64,8 @@ export default function Orders() {
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("");
   const [detailId, setDetailId] = useState(null);
-  const [statusDraft, setStatusDraft] = useState("");
-  const [paymentDraft, setPaymentDraft] = useState("");
+  // const [statusDraft, setStatusDraft] = useState("");
+  // const [paymentDraft, setPaymentDraft] = useState("");
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["orders", page, statusFilter],
@@ -85,12 +89,12 @@ export default function Orders() {
 
   const order = orderDetail?.data;
 
-  useEffect(() => {
-    if (order) {
-      setStatusDraft(order.order_status || "");
-      setPaymentDraft(order.payment_status || "");
-    }
-  }, [order]);
+  // useEffect(() => {
+  //   if (order) {
+  //     setStatusDraft(order.order_status || "");
+  //     setPaymentDraft(order.payment_status || "");
+  //   }
+  // }, [order]);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["orders"] });
@@ -98,27 +102,63 @@ export default function Orders() {
     if (detailId) queryClient.invalidateQueries({ queryKey: ["order", detailId] });
   };
 
-  const statusMutation = useMutation({
-    mutationFn: ({ id, status }) => updateOrderStatus(id, status),
-    onSuccess: () => { invalidate(); toast.success("Order status updated."); },
-    onError: (err) => toast.error(err.message || "Failed to update status"),
-  });
+  // const statusMutation = useMutation({
+  //   mutationFn: ({ id, status }) => updateOrderStatus(id, status),
+  //   onSuccess: () => { invalidate(); toast.success("Order status updated."); },
+  //   onError: (err) => toast.error(err.message || "Failed to update status"),
+  // });
 
-  const paymentMutation = useMutation({
-    mutationFn: ({ id, paymentStatus }) => updatePaymentStatus(id, paymentStatus),
-    onSuccess: () => { invalidate(); toast.success("Payment status updated."); },
-    onError: (err) => toast.error(err.message || "Failed to update payment"),
-  });
+  // const paymentMutation = useMutation({
+  //   mutationFn: ({ id, paymentStatus }) => updatePaymentStatus(id, paymentStatus),
+  //   onSuccess: () => { invalidate(); toast.success("Payment status updated."); },
+  //   onError: (err) => toast.error(err.message || "Failed to update payment"),
+  // });
 
-  const cancelMutation = useMutation({
-    mutationFn: (id) => cancelOrder(id),
+  // const cancelMutation = useMutation({
+  //   mutationFn: (id) => cancelOrder(id),
+  //   onSuccess: () => {
+  //     invalidate();
+  //     setStatusDraft("cancelled");
+  //     toast.success("Order cancelled.");
+  //   },
+  //   onError: (err) => toast.error(err.message || "Failed to cancel order"),
+  // });
+
+  const shiprocketCreateMutation = useMutation({
+    mutationFn: (id) => createShiprocketShipment(id),
     onSuccess: () => {
       invalidate();
-      setStatusDraft("cancelled");
-      toast.success("Order cancelled.");
+      toast.success("Shiprocket shipment created.");
     },
-    onError: (err) => toast.error(err.message || "Failed to cancel order"),
+    onError: (err) => toast.error(err.message || "Failed to create Shiprocket shipment"),
   });
+
+  const shiprocketSyncMutation = useMutation({
+    mutationFn: (id) => syncShiprocketTracking(id),
+    onSuccess: () => {
+      invalidate();
+      toast.success("Tracking synced from Shiprocket.");
+    },
+    onError: (err) => toast.error(err.message || "Failed to sync tracking"),
+  });
+
+  const labelMutation = useMutation({
+  mutationFn: (id) => generateShiprocketLabel(id),
+  onSuccess: () => {
+    invalidate();
+    toast.success("Shipping label generated.");
+  },
+  onError: (err) => toast.error(err.response?.data?.message || "Failed to generate label"),
+});
+
+const pickupMutation = useMutation({
+  mutationFn: (id) => scheduleShiprocketPickup(id),
+  onSuccess: () => {
+    invalidate();
+    toast.success("Pickup scheduled.");
+  },
+  onError: (err) => toast.error(err.response?.data?.message || "Failed to schedule pickup"),
+});
 
   const statusCards = [
     { key: "", label: "All", count: stats?.total_orders ?? pagination?.total ?? orders.length },
@@ -202,7 +242,7 @@ export default function Orders() {
             {
               key: "payment_method",
               label: "Payment",
-              render: (r) => (r.payment_method || "cod").toUpperCase(),
+              render: (r) => (r.payment_method || "online").toUpperCase(),
             },
             {
               key: "payment_status",
@@ -261,7 +301,7 @@ export default function Orders() {
                     <div><span className="text-muted-foreground">Email:</span> {order.email || order.customer?.email || "—"}</div>
                     <div><span className="text-muted-foreground">Phone:</span> {order.phone || order.shipping_phone || "—"}</div>
                     <div><span className="text-muted-foreground">Total:</span> ₹{(order.total_amount || 0).toLocaleString()}</div>
-                    <div><span className="text-muted-foreground">Payment:</span> {(order.payment_method || "cod").toUpperCase()} — {paymentBadge(order.payment_status)}</div>
+                    <div><span className="text-muted-foreground">Payment:</span> {(order.payment_method || "online").toUpperCase()} — {paymentBadge(order.payment_status)}</div>
                     <div><span className="text-muted-foreground">Source:</span> Website Checkout</div>
                   </div>
 
@@ -297,7 +337,184 @@ export default function Orders() {
                     </div>
                   )}
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {(order.awb_code || order.courier_name || order.tracking_url) && (
+                    <div className="text-sm border border-border rounded-lg p-3 space-y-1">
+                      <p className="font-medium mb-1">Shiprocket Tracking</p>
+                      {order.courier_name && (
+                        <p><span className="text-muted-foreground">Courier:</span> {order.courier_name}</p>
+                      )}
+                      {order.awb_code && (
+                        <p><span className="text-muted-foreground">AWB:</span> {order.awb_code}</p>
+                      )}
+                      {order.tracking_url && (
+                        <a
+                          href={order.tracking_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary hover:underline text-xs"
+                        >
+                          Open tracking link
+                        </a>
+                      )}
+                    </div>
+                  )}
+
+                  {/* <div className="flex flex-wrap gap-2">
+  <Button
+    size="sm"
+    onClick={() => shiprocketCreateMutation.mutate(detailId)}
+    disabled={!!order.awb_code || order.payment_status !== "paid" || shiprocketCreateMutation.isPending}
+  >
+    Create Shipment
+  </Button>
+
+  <Button
+    size="sm"
+    variant="secondary"
+    onClick={() => labelMutation.mutate(detailId)}
+    disabled={!order.awb_code || labelMutation.isPending}
+  >
+    Generate Label
+  </Button>
+
+  <Button
+    size="sm"
+    variant="secondary"
+    onClick={() => pickupMutation.mutate(detailId)}
+    disabled={!order.awb_code || pickupMutation.isPending}
+  >
+    Schedule Pickup
+  </Button>
+
+  <Button
+    size="sm"
+    variant="outline"
+    onClick={() => shiprocketSyncMutation.mutate(detailId)}
+    disabled={!order.awb_code || shiprocketSyncMutation.isPending}
+  >
+    Sync Tracking
+  </Button>
+
+  {order.shiprocket_label_url && (
+    <a
+      href={order.shiprocket_label_url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-sm text-primary underline self-center"
+    >
+      Download Label
+    </a>
+  )}
+</div> */}
+
+                  <div className="mt-4 space-y-3">
+  <h4 className="font-medium">Shipment Workflow</h4>
+
+  <div className="flex flex-wrap gap-2">
+    <Button
+  size="sm"
+  onClick={() => shiprocketCreateMutation.mutate(detailId)}
+  disabled={
+    !!order.awb_code ||
+    order.payment_status !== "paid" ||
+    ["shipped", "out_for_delivery", "delivered", "cancelled", "returned", "refunded"].includes(order.order_status) ||
+    shiprocketCreateMutation.isPending
+  }
+>
+  {order.awb_code ? "Shipment Created" : "Create Shipment"}
+</Button>
+    {/* <Button
+      size="sm"
+      onClick={() => shiprocketCreateMutation.mutate(detailId)}
+      disabled={
+        !!order.awb_code ||
+        order.payment_status !== "paid" ||
+        shiprocketCreateMutation.isPending
+      }
+      
+    >
+      {order.awb_code ? "Shipment Created" : "Create Shipment"}
+    </Button> */}
+
+    <Button
+      size="sm"
+      variant="secondary"
+      onClick={() => labelMutation.mutate(detailId)}
+      disabled={!order.awb_code || labelMutation.isPending}
+    >
+      Generate Label
+    </Button>
+
+    <Button
+      size="sm"
+      variant="secondary"
+      onClick={() => pickupMutation.mutate(detailId)}
+      disabled={!order.awb_code || pickupMutation.isPending}
+    >
+      Schedule Pickup
+    </Button>
+
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={() => shiprocketSyncMutation.mutate(detailId)}
+      disabled={!order.awb_code || shiprocketSyncMutation.isPending}
+    >
+      Sync Tracking
+    </Button>
+
+    {order.shiprocket_label_url && (
+      <a
+        href={order.shiprocket_label_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-sm text-primary underline self-center"
+      >
+        Download Label
+      </a>
+    )}
+  </div>
+
+  {order.awb_code && (
+    <div className="border rounded-lg p-3 text-sm space-y-1">
+      <p>
+        <span className="text-muted-foreground">Courier:</span>{" "}
+        {order.courier_name || order.shipping_method || "Shiprocket"}
+      </p>
+      <p>
+        <span className="text-muted-foreground">AWB:</span>{" "}
+        {order.awb_code}
+      </p>
+      <p>
+        <span className="text-muted-foreground">Pickup:</span>{" "}
+        {order.shiprocket_pickup_status || "Not scheduled"}
+      </p>
+
+      {order.tracking_url && (
+        <a
+          href={order.tracking_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-primary underline"
+        >
+          Open Tracking
+        </a>
+      )}
+    </div>
+  )}
+
+  <div className="text-xs text-muted-foreground">
+    Payment Status:{" "}
+    <span className="font-medium capitalize">
+      {order.payment_status}
+    </span>
+    {" "} | Order Status:{" "}
+    <span className="font-medium capitalize">
+      {String(order.order_status || "").replaceAll("_", " ")}
+    </span>
+  </div>
+</div>
+                  {/* <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <Label>Order Status</Label>
                       <select
@@ -339,9 +556,9 @@ export default function Orders() {
                         Update Payment
                       </Button>
                     </div>
-                  </div>
+                  </div> */}
 
-                  {order.order_status !== "cancelled" && (
+                  {/* {order.order_status !== "cancelled" && (
                     <Button
                       variant="destructive"
                       onClick={() => {
@@ -353,7 +570,7 @@ export default function Orders() {
                     >
                       Cancel Order
                     </Button>
-                  )}
+                  )} */}
                 </>
               ) : (
                 <p className="text-sm text-muted-foreground">Order not found.</p>

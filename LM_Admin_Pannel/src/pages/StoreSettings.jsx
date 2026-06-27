@@ -86,6 +86,7 @@ const EMPTY_INTEGRATIONS = {
   shiprocket_email: "",
   shiprocket_password: "",
   shiprocket_channel_id: "",
+  shiprocket_pickup_location: "",
   shiprocket_enabled: false,
 
   // Refund Settings
@@ -650,7 +651,7 @@ export default function StoreSettings() {
                         />
                       </CardHeader>
                       <CardContent className="space-y-4 py-2">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                           <div>
                             <Label className="text-xs font-medium">Email Address</Label>
                             <Input
@@ -680,6 +681,15 @@ export default function StoreSettings() {
                               disabled={!(integrations.shiprocket_enabled === true || integrations.shiprocket_enabled === "true")}
                             />
                           </div>
+                          <div>
+  <Label className="text-xs font-medium">Pickup Location</Label>
+  <Input
+    value={integrations.shiprocket_pickup_location}
+    onChange={(e) => updateIntegrationField("shiprocket_pickup_location", e.target.value)}
+    placeholder="e.g. Primary / LM Warehouse"
+    disabled={!(integrations.shiprocket_enabled === true || integrations.shiprocket_enabled === "true")}
+  />
+</div>
                         </div>
                         <div className="flex justify-start pt-2">
                           <Button
